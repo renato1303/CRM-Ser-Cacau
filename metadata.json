@@ -1,0 +1,6 @@
+{
+  "name": "Será Cacau CRM",
+  "description": "CRM SaaS de vendas conversacionais com funil kanban, caixa de entrada unificada e gestão inteligente",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
