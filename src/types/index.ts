@@ -162,8 +162,8 @@ export interface Task {
   responsavelId: string;
   entidadeTipo?: 'lead' | 'contact' | 'company';
   entidadeId?: string;
-  status: 'pendente' | 'em_andamento' | 'concluida' | 'cancelada';
-  prioridade: 'baixa' | 'normal' | 'alta' | 'urgente';
+  status?: 'pendente' | 'em_andamento' | 'concluida' | 'cancelada';
+  prioridade?: 'baixa' | 'normal' | 'alta' | 'urgente';
   resultado?: string;
   desfecho?: string;
   motivoCancelamento?: string;

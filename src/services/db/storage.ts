@@ -106,17 +106,17 @@ export const db = {
     const existing: Task[] = data ? JSON.parse(data) : initialTasks;
 
     if (!version || version !== '2') {
-      const migrated = existing.map(t => ({
+      const migrated: Task[] = existing.map(t => ({
         ...t,
-        status: t.status === 'concluida' ? 'concluida' : t.status === 'cancelada' ? 'cancelada' : 'pendente',
-        prioridade: (t as any).prioridade || 'normal',
+        status: (t.status === 'concluida' || t.status === 'cancelada' || t.status === 'em_andamento') ? t.status : ('pendente' as const),
+        prioridade: (t.prioridade === 'baixa' || t.prioridade === 'alta' || t.prioridade === 'urgente') ? t.prioridade : ('normal' as const),
         tipo: t.tipo || 'ligar',
         texto: t.texto || '',
         prazo: t.prazo || new Date().toISOString(),
         responsavelId: t.responsavelId || 'user-1',
         createdAt: t.createdAt || new Date().toISOString(),
         checklist: t.checklist || [],
-        recorrencia: (t as any).recorrencia || 'nenhuma',
+        recorrencia: t.recorrencia || 'nenhuma',
       }));
       localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(migrated));
       localStorage.setItem('conversa_crm_schema_version', '2');

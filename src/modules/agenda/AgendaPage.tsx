@@ -512,7 +512,7 @@ export const AgendaPage: React.FC = () => {
                         </div>
 
                         <div className="flex items-center gap-3">
-                          {resp && <Avatar src={resp.avatar} name={resp.nome} size="sm" title={resp.nome} />}
+                          {resp && <div title={resp.nome}><Avatar src={resp.avatar} name={resp.nome} size="sm" /></div>}
 
                           {/* Status Badge clickable */}
                           <select

@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { 
   User, Pipeline, Tag, LeadSource, LossReason, 
-  Lead, Contact, Company, Product, Task, Note, Conversation, Message, Channel, ActivityEvent, Notification, MessageTemplate, EmailMessage, EmailTemplate, AutomationRule, SalesBot, BotNode 
+  Lead, Contact, Company, Product, Task, Note, Conversation, Message, Channel, ActivityEvent, Notification, MessageTemplate, EmailMessage, EmailTemplate, AutomationRule, SalesBot, BotNode, TaskTypeConfig, TaskOutcomeConfig 
 } from '../types';
 import { db } from '../services/db/storage';
 import { supabaseService } from '../services/db/supabase';
@@ -67,8 +67,11 @@ interface CRMState {
   deleteContact: (id: string) => void;
 
   // Task actions
-  addTask: (task: Omit<Task, 'id' | 'createdAt' | 'status'>) => Task;
-  completeTask: (taskId: string, resultado?: string) => void;
+  taskTypes: TaskTypeConfig[];
+  taskOutcomes: TaskOutcomeConfig[];
+  addTask: (task: Omit<Task, 'id' | 'createdAt'> & { status?: 'pendente' | 'em_andamento' | 'concluida' | 'cancelada'; prioridade?: 'baixa' | 'normal' | 'alta' | 'urgente' }) => Task;
+  updateTask: (id: string, updates: Partial<Task>) => void;
+  completeTask: (taskId: string, resultado?: string, desfecho?: string) => void;
   deleteTask: (taskId: string) => void;
   rescheduleTask: (taskId: string, novoPrazo: string) => void;
 
@@ -123,6 +126,8 @@ export const useStore = create<CRMState>((set, get) => ({
   contacts: db.getContacts(),
   leads: db.getLeads(),
   tasks: db.getTasks(),
+  taskTypes: db.getTaskTypes(),
+  taskOutcomes: db.getTaskOutcomes(),
   notes: db.getNotes(),
   conversations: db.getConversations(),
   messages: db.getMessages(),
@@ -317,7 +322,13 @@ export const useStore = create<CRMState>((set, get) => ({
   },
 
   addTask: (taskData) => {
-    const newTask: Task = { ...taskData, id: `task-${Date.now()}`, status: 'pendente', createdAt: new Date().toISOString() };
+    const newTask: Task = { 
+      prioridade: 'normal',
+      ...taskData, 
+      id: `task-${Date.now()}`, 
+      status: taskData.status || 'pendente', 
+      createdAt: new Date().toISOString() 
+    };
     const tasks = [newTask, ...get().tasks];
     db.saveTasks(tasks);
     set({ tasks });
@@ -325,14 +336,26 @@ export const useStore = create<CRMState>((set, get) => ({
     return newTask;
   },
 
-  completeTask: (taskId, resultado) => {
+  updateTask: (id, updates) => {
+    const tasks = get().tasks.map(t => t.id === id ? { ...t, ...updates, updatedAt: new Date().toISOString() } : t);
+    db.saveTasks(tasks);
+    set({ tasks });
+  },
+
+  completeTask: (taskId, resultado = 'Concluída', desfecho) => {
     const task = get().tasks.find(t => t.id === taskId);
-    const tasks = get().tasks.map(t => t.id === taskId ? { ...t, status: 'concluida' as const, resultado: resultado || 'Concluída', concluidaAt: new Date().toISOString() } : t);
+    const tasks = get().tasks.map(t => t.id === taskId ? { 
+      ...t, 
+      status: 'concluida' as const, 
+      resultado: resultado, 
+      desfecho: desfecho || t.desfecho,
+      concluidaAt: new Date().toISOString() 
+    } : t);
     db.saveTasks(tasks);
 
-    if (task && task.entidadeTipo === 'lead') {
+    if (task && task.entidadeTipo === 'lead' && task.entidadeId) {
       get().addNote({
-        texto: `Tarefa concluída: "${task.texto}". Resultado: ${resultado || 'Sucesso'}`,
+        texto: `Tarefa concluída: "${task.texto}". Desfecho: ${desfecho || 'Concluído'}. Resultado: ${resultado}`,
         entidadeTipo: 'lead',
         entidadeId: task.entidadeId,
         autorId: get().currentUser.id,

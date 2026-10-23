@@ -351,6 +351,7 @@ export const initialTasks: Task[] = [
     entidadeTipo: 'lead',
     entidadeId: 'lead-1',
     status: 'pendente',
+    prioridade: 'normal',
     createdAt: '2026-03-15T10:00:00Z',
   },
   {
@@ -362,6 +363,7 @@ export const initialTasks: Task[] = [
     entidadeTipo: 'lead',
     entidadeId: 'lead-2',
     status: 'pendente',
+    prioridade: 'normal',
     createdAt: '2026-03-14T09:00:00Z',
   },
   {
@@ -373,6 +375,7 @@ export const initialTasks: Task[] = [
     entidadeTipo: 'lead',
     entidadeId: 'lead-3',
     status: 'pendente',
+    prioridade: 'normal',
     createdAt: '2026-03-16T11:00:00Z',
   }
 ];

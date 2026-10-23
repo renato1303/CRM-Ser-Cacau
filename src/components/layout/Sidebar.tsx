@@ -30,7 +30,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ onOpenLoginModal }) => {
     { id: 'automacoes', label: 'Automações', icon: Workflow },
     { id: 'transmissoes', label: 'Transmissões', icon: Send },
     { id: 'captura', label: 'Captura', icon: Globe },
-    { id: 'plugins', label: 'Plugins', icon: Plug },
+    { id: 'canais', label: 'Canais', icon: Plug },
     { id: 'configuracoes', label: 'Config.', icon: Settings },
   ];
 

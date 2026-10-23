@@ -77,7 +77,8 @@ export const Shell: React.FC = () => {
       case 'automacoes': return <AutomacoesPage />;
       case 'transmissoes': return <TransmissoesPage />;
       case 'captura': return <CapturaPage />;
-      case 'plugins': return <PluginsPage />;
+      case 'plugins':
+      case 'canais': return <PluginsPage />;
       case 'configuracoes': return <ConfiguracoesPage />;
       default: return <PainelPage />;
     }
@@ -96,7 +97,8 @@ export const Shell: React.FC = () => {
       case 'automacoes': return 'Automações & Salesbot';
       case 'transmissoes': return 'Transmissoes em Massa';
       case 'captura': return 'Captura de Leads';
-      case 'plugins': return 'Plugins & Gateway WhatsApp';
+      case 'plugins':
+      case 'canais': return 'Canais e integrações';
       case 'configuracoes': return 'Configurações';
       default: return 'Será Cacau CRM';
     }
