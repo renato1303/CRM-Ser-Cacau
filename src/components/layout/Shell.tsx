@@ -67,7 +67,6 @@ export const Shell: React.FC = () => {
       case 'painel': return <PainelPage />;
       case 'leads': return <LeadsPage />;
       case 'chats': return <ChatsPage />;
-      case 'agenda': return <AgendaPage />;
       case 'listas/contatos':
       case 'listas/empresas':
       case 'listas/produtos':
@@ -76,7 +75,6 @@ export const Shell: React.FC = () => {
       case 'estatisticas': return <EstatisticasPage />;
       case 'automacoes': return <AutomacoesPage />;
       case 'transmissoes': return <TransmissoesPage />;
-      case 'captura': return <CapturaPage />;
       case 'plugins':
       case 'canais': return <PluginsPage />;
       case 'configuracoes': return <ConfiguracoesPage />;
@@ -90,13 +88,11 @@ export const Shell: React.FC = () => {
       case 'painel': return 'Painel Geral';
       case 'leads': return 'Funil de Vendas & Leads';
       case 'chats': return 'Caixa de Entrada Unificada';
-      case 'agenda': return 'Central de Tarefas';
       case 'listas/contatos': return 'Listas & Cadastros';
       case 'email': return 'E-mail Comercial';
       case 'estatisticas': return 'Estatísticas & Relatórios';
       case 'automacoes': return 'Automações & Salesbot';
       case 'transmissoes': return 'Transmissoes em Massa';
-      case 'captura': return 'Captura de Leads';
       case 'plugins':
       case 'canais': return 'Canais e integrações';
       case 'configuracoes': return 'Configurações';

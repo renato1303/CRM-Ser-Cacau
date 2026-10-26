@@ -23,13 +23,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ onOpenLoginModal }) => {
     { id: 'painel', label: 'Painel', icon: LayoutDashboard },
     { id: 'leads', label: 'Leads', icon: Users },
     { id: 'chats', label: 'Chats', icon: MessageSquare, badge: unreadChatsCount > 0 ? unreadChatsCount : undefined },
-    { id: 'agenda', label: 'Tarefas', icon: Calendar, badge: overdueTasksCount > 0 ? overdueTasksCount : undefined, badgeVariant: 'danger' },
     { id: 'listas/contatos', label: 'Listas', icon: ListTree },
     { id: 'email', label: 'E-mail', icon: Mail },
     { id: 'estatisticas', label: 'Estatísticas', icon: BarChart3 },
     { id: 'automacoes', label: 'Automações', icon: Workflow },
     { id: 'transmissoes', label: 'Transmissões', icon: Send },
-    { id: 'captura', label: 'Captura', icon: Globe },
     { id: 'canais', label: 'Canais', icon: Plug },
     { id: 'configuracoes', label: 'Config.', icon: Settings },
   ];
@@ -66,8 +64,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ onOpenLoginModal }) => {
                 <Icon className={cn('w-5 h-5 transition-transform group-hover:scale-110', isActive && 'text-indigo-400')} />
                 {item.badge !== undefined && (
                   <span className={cn(
-                    'absolute -top-1.5 -right-2 px-1.5 py-0.2 text-[10px] font-bold rounded-full text-white',
-                    item.badgeVariant === 'danger' ? 'bg-red-600' : 'bg-indigo-600'
+                    'absolute -top-1.5 -right-2 px-1.5 py-0.2 text-[10px] font-bold rounded-full text-white bg-indigo-600'
                   )}>
                     {item.badge}
                   </span>

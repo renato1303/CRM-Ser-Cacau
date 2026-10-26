@@ -12,7 +12,7 @@ export const ConfiguracoesPage: React.FC = () => {
     emailTemplates, addEmailTemplate, deleteEmailTemplate, 
     restoreSeed, clearAllData, clearAllDataCompletely 
   } = useStore();
-  const [tab, setTab] = useState<'geral' | 'templates' | 'email_templates'>('geral');
+  const [tab, setTab] = useState<'templates' | 'email_templates'>('templates');
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   
   // New template modal
@@ -94,7 +94,6 @@ export const ConfiguracoesPage: React.FC = () => {
 
       <Tabs
         tabs={[
-          { id: 'geral', label: 'Geral & Backup' },
           { id: 'templates', label: 'Modelos de Mensagem', badge: messageTemplates.length },
           { id: 'email_templates', label: 'Modelos de E-mail', badge: emailTemplates.length },
         ]}
@@ -102,34 +101,6 @@ export const ConfiguracoesPage: React.FC = () => {
         onChange={(id) => setTab(id as any)}
         className="mb-6"
       />
-
-      {tab === 'geral' && (
-        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm p-6 space-y-6">
-          <div>
-            <h3 className="text-base font-bold text-slate-900 dark:text-slate-100 mb-2">Gerenciamento de Dados & Backup</h3>
-            <p className="text-xs text-slate-500 mb-4">Você pode restaurar os dados de demonstração realistas, exportar backup em JSON ou limpar o armazenamento local.</p>
-            
-            <div className="flex flex-wrap gap-4">
-              <Button onClick={handleRestore} variant="outline" size="sm" className="gap-2">
-                <RefreshCw className="w-4 h-4" /> Restaurar Dados de Exemplo
-              </Button>
-              <Button onClick={handleExport} variant="outline" size="sm" className="gap-2">
-                <Download className="w-4 h-4" /> Exportar Backup (JSON)
-              </Button>
-              <Button onClick={() => {
-                if (window.confirm('Tem certeza que deseja limpar todos os leads, conversas e tarefas?')) {
-                  clearAllDataCompletely();
-                }
-              }} variant="danger" size="sm" className="gap-2">
-                <Trash2 className="w-4 h-4" /> Limpar Dados Operacionais (Zerar)
-              </Button>
-              <Button onClick={handleClear} variant="danger" size="sm" className="gap-2">
-                <Trash2 className="w-4 h-4" /> Apagar Tudo & Reiniciar
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {tab === 'templates' && (
         <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm p-6 flex flex-col flex-1">
