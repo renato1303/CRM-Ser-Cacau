@@ -12,15 +12,11 @@ import { PainelPage } from '../../modules/painel/PainelPage';
 import { LeadsPage } from '../../modules/leads/LeadsPage';
 import { LeadDetailPage } from '../../modules/leads/LeadDetailPage';
 import { ChatsPage } from '../../modules/chats/ChatsPage';
-import { AgendaPage } from '../../modules/agenda/AgendaPage';
-import { PublicSchedulingPage } from '../../modules/agenda/PublicSchedulingPage';
 import { ListasPage } from '../../modules/listas/ListasPage';
 import { EmailPage } from '../../modules/email/EmailPage';
 import { EstatisticasPage } from '../../modules/estatisticas/EstatisticasPage';
 import { AutomacoesPage } from '../../modules/automacoes/AutomacoesPage';
 import { TransmissoesPage } from '../../modules/transmissoes/TransmissoesPage';
-import { CapturaPage } from '../../modules/captura/CapturaPage';
-import { PublicFormPage } from '../../modules/captura/PublicFormPage';
 import { ConfiguracoesPage } from '../../modules/configuracoes/ConfiguracoesPage';
 import { PluginsPage } from '../../modules/plugins/PluginsPage';
 
@@ -44,16 +40,6 @@ export const Shell: React.FC = () => {
 
   if (!isAuthenticated) {
     return <LoginPage />;
-  }
-
-  if (activeModule.startsWith('agendar/')) {
-    const usuarioId = activeModule.replace('agendar/', '');
-    return <PublicSchedulingPage usuarioId={usuarioId} />;
-  }
-
-  if (activeModule.startsWith('f/')) {
-    const formId = activeModule.replace('f/', '');
-    return <PublicFormPage formId={formId} />;
   }
 
   // Render module

@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { Button } from '../../components/ui/Button';
+import { db } from '../../services/db/storage';
 
 interface WhatsAppAccount {
   id: string;
@@ -29,8 +30,9 @@ interface QRInstance {
 }
 
 export const PluginsPage: React.FC = () => {
-  const { addToast } = useStore();
+  const { addToast, refreshData } = useStore();
   const [activeTab, setActiveTab] = useState<'canais' | 'integracoes' | 'webhooks'>('canais');
+  const [syncingMessages, setSyncingMessages] = useState(false);
 
   const [officialAccounts, setOfficialAccounts] = useState<WhatsAppAccount[]>([
     {
@@ -46,7 +48,37 @@ export const PluginsPage: React.FC = () => {
     }
   ]);
 
-  const [qrInstances, setQrInstances] = useState<QRInstance[]>([]);
+  const [qrInstances, setQrInstances] = useState<QRInstance[]>(() => db.getWaQrInstances());
+
+  useEffect(() => {
+    fetch('/api/crm/data')
+      .then(res => res.json())
+      .then(data => {
+        if (data.wa_qr_instances && Array.isArray(data.wa_qr_instances)) {
+          const mapped = data.wa_qr_instances.map((i: any) => ({
+            id: i.id || i.instance_name,
+            instanceName: i.instance_name || i.id,
+            nomeConexao: i.nome_conexao || i.instance_name,
+            status: i.status || 'open',
+            numero: i.numero || '',
+            perfilNome: i.perfil_nome || i.nome_conexao
+          }));
+          setQrInstances(mapped);
+          db.saveWaQrInstances(mapped);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    db.saveWaQrInstances(qrInstances);
+    // Also sync to server crm data
+    fetch('/api/crm/data', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ wa_qr_instances: qrInstances })
+    }).catch(() => {});
+  }, [qrInstances]);
 
   // Assistant modal state
   const [assistantOpen, setAssistantOpen] = useState(false);
@@ -163,6 +195,42 @@ export const PluginsPage: React.FC = () => {
     }
   };
 
+  // Detecta sozinho quando o celular conecta (etapa 3 do assistente)
+  useEffect(() => {
+    if (!qrAssistantOpen || qrStep !== 3 || !fixedInstanceName) return;
+    let cancelled = false;
+    const checkConnection = async () => {
+      try {
+        const res = await fetch('/api/evolution/state', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ instanceName: fixedInstanceName, nomeConexao: connName })
+        });
+        const data = await res.json();
+        if (cancelled || !res.ok || data.state !== 'open') return;
+        cancelled = true;
+        const connected: QRInstance = {
+          id: fixedInstanceName,
+          instanceName: fixedInstanceName,
+          nomeConexao: connName,
+          status: 'open',
+          numero: data.numero || '',
+          perfilNome: data.profileName || connName
+        };
+        setQrInstances(prev => [connected, ...prev.filter(i => i.instanceName !== fixedInstanceName)]);
+        setQrAssistantOpen(false);
+        setQrStep(1);
+        if (data.warning) addToast('Atenção', data.warning, 'info');
+        addToast('WhatsApp conectado', `${data.numero || fixedInstanceName} conectado. As mensagens novas vão aparecer em Chats.`, 'success');
+      } catch {
+        /* tenta de novo no próximo ciclo */
+      }
+    };
+    checkConnection();
+    const interval = setInterval(checkConnection, 3000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [qrAssistantOpen, qrStep, fixedInstanceName, connName, addToast]);
+
   const handleFetchAvailableInstances = async () => {
     setLoadingInstances(true);
     setLinkModalOpen(true);
@@ -183,23 +251,29 @@ export const PluginsPage: React.FC = () => {
       const res = await fetch('/api/evolution/link', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ instanceName: instName, nomeConexao: 'Vinculada ' + instName })
+        body: JSON.stringify({ instanceName: instName, nomeConexao: inst.profileName || 'Instância ' + instName })
       });
       const data = await res.json();
       if (res.ok) {
         const linked: QRInstance = {
           id: 'link-' + Date.now(),
           instanceName: instName,
-          nomeConexao: 'Instância ' + instName,
+          nomeConexao: data.profileName || inst.profileName || 'Instância ' + instName,
           status: data.state || 'open',
-          numero: inst.owner || '+55 (11) 99999-9999'
+          numero: data.numero || inst.owner || inst.number || '',
+          perfilNome: data.profileName || inst.profileName
         };
-        setQrInstances(prev => [linked, ...prev.filter(i => i.instanceName !== instName)]);
+        const updated = [linked, ...qrInstances.filter(i => i.instanceName !== instName)];
+        setQrInstances(updated);
+        db.saveWaQrInstances(updated);
         setLinkModalOpen(false);
-        addToast('Instância Vinculada', `A instância ${instName} foi vinculada com sucesso!`, 'success');
+        addToast('Instância Vinculada', `A instância ${instName} (${linked.numero}) foi vinculada e o webhook foi configurado.`, 'success');
+        if (data.warning) addToast('Atenção', data.warning, 'info');
+      } else {
+        throw new Error(data.error || 'Não foi possível vincular a instância.');
       }
     } catch (err: any) {
-      addToast('Erro', 'Não foi possível vincular a instância.', 'error');
+      addToast('Erro ao vincular', err.message || 'Não foi possível vincular a instância.', 'error');
     }
   };
 
@@ -476,6 +550,36 @@ export const PluginsPage: React.FC = () => {
                 <div className="flex justify-between"><span>Status da Sessão:</span><span className="text-emerald-400 font-bold uppercase">{manageQrInstance.status}</span></div>
                 <div className="flex justify-between"><span>Instância:</span><span className="font-mono text-indigo-400">{manageQrInstance.instanceName}</span></div>
               </div>
+
+              <Button 
+                onClick={async () => {
+                  setSyncingMessages(true);
+                  try {
+                    const res = await fetch('/api/evolution/sync', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ instanceName: manageQrInstance.instanceName })
+                    });
+                    const data = await res.json();
+                    if (res.ok) {
+                      addToast('Sincronização Concluída', `${data.syncedChats || 0} conversas e ${data.syncedMessages || 0} mensagens importadas.`, 'success');
+                      setManageQrInstance(null);
+                      refreshData();
+                    } else {
+                      throw new Error(data.error || 'Erro ao sincronizar');
+                    }
+                  } catch (err: any) {
+                    addToast('Erro', err.message || 'Falha ao sincronizar mensagens.', 'error');
+                  } finally {
+                    setSyncingMessages(false);
+                  }
+                }} 
+                disabled={syncingMessages} 
+                size="sm" 
+                className="w-full gap-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${syncingMessages ? 'animate-spin' : ''}`} /> Sincronizar Conversas e Mensagens
+              </Button>
             </div>
 
             <div className="pt-2 flex gap-2">

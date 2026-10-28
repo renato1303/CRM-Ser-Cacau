@@ -1,0 +1,804 @@
+// API do CRM (Express). Na Vercel roda como função serverless; no AI Studio é carregada pelo server.ts.
+// Gerado a partir do server.ts corrigido. Não coloque dados simulados aqui.
+import express from "express";
+import dotenv from "dotenv";
+import { createClient } from "@supabase/supabase-js";
+dotenv.config();
+const app = express();
+app.use(express.json({ limit: "10mb", verify: (req, _res, buf) => {
+  req.rawBody = buf;
+} }));
+const PORT = process.env.PORT || 3e3;
+const GRAPH_API_VERSION = process.env.GRAPH_API_VERSION || "v19.0";
+const META_APP_ID = process.env.META_APP_ID || process.env.VITE_META_APP_ID || "";
+const META_APP_SECRET = process.env.META_APP_SECRET || "";
+const WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || "";
+const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || "").trim().replace(/\/+$/, "");
+const EVOLUTION_API_KEY = (process.env.EVOLUTION_API_KEY || "").trim();
+const EVOLUTION_WEBHOOK_SECRET = (process.env.EVOLUTION_WEBHOOK_SECRET || "").trim();
+const VERCEL_PRODUCTION_URL = process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : "";
+const PUBLIC_BASE_URL = (process.env.PUBLIC_WEBHOOK_BASE_URL || VERCEL_PRODUCTION_URL || process.env.APP_URL || "").trim().replace(/\/+$/, "");
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || "";
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const supabaseAdmin = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } }) : null;
+const WEBHOOK_EVENTS = [
+  "QRCODE_UPDATED",
+  "CONNECTION_UPDATE",
+  "MESSAGES_UPSERT",
+  "MESSAGES_UPDATE",
+  "SEND_MESSAGE",
+  "CONTACTS_UPSERT",
+  "CONTACTS_UPDATE"
+];
+class EvolutionError extends Error {
+  status;
+  body;
+  constructor(status, message, body) {
+    super(message);
+    this.status = status;
+    this.body = body;
+  }
+}
+const enc = (s) => encodeURIComponent(s);
+async function evo(endpoint, options = {}) {
+  if (!EVOLUTION_API_URL || !EVOLUTION_API_KEY) {
+    throw new EvolutionError(0, "EVOLUTION_API_URL ou EVOLUTION_API_KEY n\xE3o est\xE3o configurados nos Secrets do AI Studio.");
+  }
+  const method = options.method || "GET";
+  const start = Date.now();
+  let res;
+  try {
+    res = await fetch(`${EVOLUTION_API_URL}${endpoint}`, {
+      method,
+      headers: { apikey: EVOLUTION_API_KEY, "Content-Type": "application/json" },
+      body: options.body !== void 0 ? JSON.stringify(options.body) : void 0
+    });
+  } catch (err) {
+    const cause = err?.cause?.code || err?.cause?.message || err?.message || "erro de rede";
+    console.error(`[Evolution] ${method} ${endpoint} -> sem resposta (${cause})`);
+    throw new EvolutionError(0, `O servidor da Evolution n\xE3o respondeu em ${EVOLUTION_API_URL} (${cause}).`);
+  }
+  const text = await res.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = { raw: text };
+  }
+  console.log(`[Evolution] ${method} ${endpoint} -> ${res.status} (${Date.now() - start}ms)`);
+  if (!res.ok) {
+    throw new EvolutionError(res.status, `Evolution respondeu ${res.status} em ${method} ${endpoint}: ${text.slice(0, 400)}`, data);
+  }
+  return data;
+}
+function db() {
+  if (!supabaseAdmin) {
+    throw new Error("Supabase n\xE3o configurado no servidor: defina SUPABASE_URL (ou VITE_SUPABASE_URL) e SUPABASE_SERVICE_ROLE_KEY nas variáveis de ambiente (Vercel) ou Secrets (AI Studio).");
+  }
+  return supabaseAdmin;
+}
+function check(result, context) {
+  if (result.error) {
+    throw new Error(`Supabase (${context}): ${result.error.message}${result.error.hint ? " \u2014 " + result.error.hint : ""}`);
+  }
+  return result.data;
+}
+function errorMessage(err) {
+  return err?.message || String(err);
+}
+function isIgnoredJid(jid) {
+  return !jid || jid.endsWith("@g.us") || jid.endsWith("@broadcast") || jid.endsWith("@newsletter");
+}
+function resolveJid(key) {
+  const raw = key?.remoteJid || "";
+  const alt = [key?.remoteJidAlt, key?.senderPn, key?.participantAlt].find((j) => typeof j === "string" && j.endsWith("@s.whatsapp.net"));
+  const jid = raw.endsWith("@s.whatsapp.net") ? raw : alt || raw;
+  const phone = jid.endsWith("@s.whatsapp.net") ? jid.split("@")[0].split(":")[0] : "";
+  return { remoteJid: jid, phone };
+}
+function conversationIdFor(instance, remoteJid) {
+  return `wa:${instance}:${remoteJid.split("@")[0]}`;
+}
+function waKey(remoteJid) {
+  return remoteJid.split("@")[0];
+}
+function unwrapMessage(message) {
+  let m = message || {};
+  for (let i = 0; i < 4; i++) {
+    const inner = m.ephemeralMessage?.message || m.viewOnceMessage?.message || m.viewOnceMessageV2?.message || m.viewOnceMessageV2Extension?.message || m.documentWithCaptionMessage?.message || m.editedMessage?.message;
+    if (!inner) break;
+    m = inner;
+  }
+  return m;
+}
+function extractContent(message) {
+  const m = unwrapMessage(message);
+  if (!m || typeof m !== "object") return null;
+  if (m.protocolMessage || m.reactionMessage) return null;
+  if (m.conversation) return { tipo: "texto", conteudo: m.conversation };
+  if (m.extendedTextMessage?.text) return { tipo: "texto", conteudo: m.extendedTextMessage.text };
+  if (m.imageMessage) return { tipo: "imagem", conteudo: m.imageMessage.caption || "[Imagem]" };
+  if (m.videoMessage) return { tipo: "arquivo", conteudo: m.videoMessage.caption || "[Vídeo]" };
+  if (m.audioMessage) return { tipo: "audio", conteudo: "[Áudio]" };
+  if (m.documentMessage) return { tipo: "arquivo", conteudo: `[Documento] ${m.documentMessage.fileName || ""}`.trim() };
+  if (m.stickerMessage) return { tipo: "imagem", conteudo: "[Figurinha]" };
+  if (m.locationMessage || m.liveLocationMessage) return { tipo: "texto", conteudo: "[Localização]" };
+  if (m.contactMessage || m.contactsArrayMessage) return { tipo: "texto", conteudo: "[Contato]" };
+  if (m.buttonsResponseMessage) return { tipo: "texto", conteudo: m.buttonsResponseMessage.selectedDisplayText || "[Resposta de botão]" };
+  if (m.listResponseMessage) return { tipo: "texto", conteudo: m.listResponseMessage.title || "[Resposta de lista]" };
+  if (m.templateButtonReplyMessage) return { tipo: "texto", conteudo: m.templateButtonReplyMessage.selectedDisplayText || "[Resposta]" };
+  if (m.pollCreationMessage || m.pollCreationMessageV3) return { tipo: "texto", conteudo: `[Enquete] ${(m.pollCreationMessage || m.pollCreationMessageV3).name || ""}`.trim() };
+  if (m.senderKeyDistributionMessage && Object.keys(m).length <= 2) return null;
+  return { tipo: "texto", conteudo: "[Mensagem não suportada]" };
+}
+function toIsoTimestamp(ts) {
+  let seconds = ts;
+  if (ts && typeof ts === "object") seconds = ts.low ?? ts.seconds ?? ts.toString?.();
+  const n = Number(seconds);
+  if (!n || Number.isNaN(n)) return (/* @__PURE__ */ new Date()).toISOString();
+  return new Date(n > 1e12 ? n : n * 1e3).toISOString();
+}
+const STATUS_RANK = { enviada: 1, entregue: 2, lida: 3 };
+function mapStatus(s) {
+  if (s === void 0 || s === null || s === "") return null;
+  if (typeof s === "number") {
+    if (s === 0) return "falhou";
+    if (s <= 2) return "enviada";
+    if (s === 3) return "entregue";
+    return "lida";
+  }
+  const v = String(s).toUpperCase();
+  if (v.includes("READ") || v.includes("PLAYED")) return "lida";
+  if (v.includes("DELIVERY")) return "entregue";
+  if (v.includes("ERROR") || v.includes("FAIL")) return "falhou";
+  if (v.includes("SERVER") || v.includes("PENDING") || v.includes("SENT")) return "enviada";
+  return null;
+}
+function formatPhone(raw) {
+  const clean = (raw || "").split("@")[0].split(":")[0].replace(/\D/g, "");
+  if (clean.length === 13 && clean.startsWith("55")) return `+55 (${clean.slice(2, 4)}) ${clean.slice(4, 9)}-${clean.slice(9)}`;
+  if (clean.length === 12 && clean.startsWith("55")) return `+55 (${clean.slice(2, 4)}) ${clean.slice(4, 8)}-${clean.slice(8)}`;
+  return clean ? `+${clean}` : "";
+}
+function pickArray(data) {
+  if (Array.isArray(data)) return data;
+  const candidates = [data?.messages?.records, data?.records, data?.messages, data?.chats, data?.data, data?.instances];
+  return candidates.find(Array.isArray) || [];
+}
+async function saveIncomingMessage(instance, msg, live) {
+  const key = msg?.key || {};
+  const { remoteJid, phone } = resolveJid(key);
+  if (isIgnoredJid(remoteJid) || !key.id) return "ignorada";
+  const content = extractContent(msg.message);
+  if (!content) return "ignorada";
+  const sb = db();
+  const fromMe = !!key.fromMe;
+  const sentAt = toIsoTimestamp(msg.messageTimestamp);
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const convId = conversationIdFor(instance, remoteJid);
+  const existingConv = check(await sb.from("wa_conversations").select("id, nao_lidas, ultima_mensagem_at, contact_name, criar_lead").eq("id", convId).maybeSingle(), "ler conversa");
+  const existingMsg = check(await sb.from("wa_messages").select("id, status").eq("id", key.id).maybeSingle(), "ler mensagem");
+  const isNew = !existingMsg;
+  const isLatest = !existingConv?.ultima_mensagem_at || new Date(sentAt).getTime() >= new Date(existingConv.ultima_mensagem_at).getTime();
+  const contactName = !fromMe && msg.pushName ? msg.pushName : existingConv?.contact_name || formatPhone(phone) || waKey(remoteJid);
+  let naoLidas = existingConv?.nao_lidas || 0;
+  if (live && isNew) naoLidas = fromMe ? 0 : naoLidas + 1;
+  const convRow = {
+    id: convId,
+    instance_name: instance,
+    remote_jid: remoteJid,
+    phone: phone || null,
+    contact_name: contactName,
+    nao_lidas: naoLidas,
+    criar_lead: Boolean(existingConv?.criar_lead) || live && !fromMe,
+    updated_at: now
+  };
+  if (isLatest) {
+    convRow.ultima_mensagem = content.conteudo;
+    convRow.ultima_mensagem_at = sentAt;
+  }
+  check(await sb.from("wa_conversations").upsert(convRow, { onConflict: "id" }), "gravar conversa");
+  const payloadStatus = mapStatus(msg.status);
+  if (isNew) {
+    check(await sb.from("wa_messages").upsert({
+      id: key.id,
+      conversation_id: convId,
+      from_me: fromMe,
+      tipo: content.tipo,
+      conteudo: content.conteudo,
+      status: payloadStatus || (fromMe ? "enviada" : "entregue"),
+      enviada_at: sentAt,
+      updated_at: now
+    }, { onConflict: "id" }), "gravar mensagem");
+  } else {
+    const update = { conteudo: content.conteudo, tipo: content.tipo, updated_at: now };
+    if (payloadStatus && (payloadStatus === "falhou" || (STATUS_RANK[payloadStatus] || 0) > (STATUS_RANK[existingMsg.status] || 0))) {
+      update.status = payloadStatus;
+    }
+    check(await sb.from("wa_messages").update(update).eq("id", key.id), "atualizar mensagem");
+  }
+  return isNew ? "nova" : "atualizada";
+}
+async function updateMessageStatus(item) {
+  const id = item?.keyId || item?.key?.id || item?.messageId || item?.id;
+  const status = mapStatus(item?.status ?? item?.update?.status);
+  if (!id || !status) return;
+  const sb = db();
+  const current = check(await sb.from("wa_messages").select("status").eq("id", id).maybeSingle(), "ler status");
+  if (!current) return;
+  if (status !== "falhou" && (STATUS_RANK[status] || 0) <= (STATUS_RANK[current.status] || 0)) return;
+  check(await sb.from("wa_messages").update({ status, updated_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("id", id), "atualizar status");
+}
+async function updateContactNames(instance, items) {
+  const sb = db();
+  for (const c of items) {
+    const jid = c?.remoteJid || c?.id || "";
+    const name = c?.pushName || c?.name || c?.notify || "";
+    if (!jid || !name || isIgnoredJid(jid)) continue;
+    check(await sb.from("wa_conversations").update({ contact_name: name, updated_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("id", conversationIdFor(instance, jid)), "atualizar nome do contato");
+  }
+}
+let webhookLogCount = 0;
+async function logWebhook(instance, event, ok, detail) {
+  if (!supabaseAdmin) return;
+  try {
+    await supabaseAdmin.from("wa_webhook_log").insert({ instance, event, ok, detail: detail?.slice(0, 1e3) || null });
+    await supabaseAdmin.from("wa_instances").upsert({
+      instance_name: instance || "desconhecida",
+      last_event_at: (/* @__PURE__ */ new Date()).toISOString(),
+      last_event_type: event,
+      updated_at: (/* @__PURE__ */ new Date()).toISOString()
+    }, { onConflict: "instance_name" });
+    webhookLogCount++;
+    if (webhookLogCount % 200 === 0) {
+      const cutoff = new Date(Date.now() - 3 * 24 * 3600 * 1e3).toISOString();
+      await supabaseAdmin.from("wa_webhook_log").delete().lt("received_at", cutoff);
+    }
+  } catch (err) {
+    console.warn("[Webhook QR] falha ao registrar log:", errorMessage(err));
+  }
+}
+function webhookUrlFor() {
+  if (!PUBLIC_BASE_URL) {
+    throw new Error("A URL pública do CRM não está definida. Defina PUBLIC_WEBHOOK_BASE_URL com a URL publicada do CRM (ex.: https://seu-projeto.vercel.app).");
+  }
+  const token = EVOLUTION_WEBHOOK_SECRET ? `?token=${enc(EVOLUTION_WEBHOOK_SECRET)}` : "";
+  return `${PUBLIC_BASE_URL}/api/webhook/whatsapp-qr${token}`;
+}
+function publicUrlWarning() {
+  if (!PUBLIC_BASE_URL) return "URL pública do CRM não definida (PUBLIC_WEBHOOK_BASE_URL).";
+  if (PUBLIC_BASE_URL.includes("ais-dev")) {
+    return "O webhook está apontando para a URL de desenvolvimento do AI Studio (ais-dev), que não recebe chamadas externas. Use a URL publicada (Vercel) e, se precisar, defina PUBLIC_WEBHOOK_BASE_URL com ela.";
+  }
+  return null;
+}
+async function configureWebhook(instanceName) {
+  const url = webhookUrlFor();
+  const headers = EVOLUTION_WEBHOOK_SECRET ? { "x-webhook-secret": EVOLUTION_WEBHOOK_SECRET } : {};
+  try {
+    await evo(`/webhook/set/${enc(instanceName)}`, {
+      method: "POST",
+      body: { webhook: { enabled: true, url, headers, byEvents: false, base64: false, events: WEBHOOK_EVENTS } }
+    });
+  } catch (err) {
+    if (err instanceof EvolutionError && err.status === 400) {
+      await evo(`/webhook/set/${enc(instanceName)}`, {
+        method: "POST",
+        body: { enabled: true, url, webhookByEvents: false, webhookBase64: false, events: WEBHOOK_EVENTS }
+      });
+    } else {
+      throw err;
+    }
+  }
+  return url.replace(/token=[^&]+/, "token=***");
+}
+async function getInstanceInfo(instanceName) {
+  let state = "close";
+  try {
+    const st = await evo(`/instance/connectionState/${enc(instanceName)}`);
+    state = st?.instance?.state || st?.state || "close";
+  } catch (err) {
+    if (!(err instanceof EvolutionError) || err.status === 0) throw err;
+  }
+  let found = null;
+  try {
+    const list = pickArray(await evo(`/instance/fetchInstances?instanceName=${enc(instanceName)}`));
+    found = list.map((i) => i?.instance || i).find((i) => (i?.name || i?.instanceName) === instanceName) || null;
+  } catch {
+  }
+  const owner = found?.ownerJid || found?.owner || found?.number || "";
+  return {
+    state,
+    numero: formatPhone(owner),
+    profileName: found?.profileName || ""
+  };
+}
+async function linkInstance(instanceName, nomeConexao) {
+  const info = await getInstanceInfo(instanceName);
+  const webhookUrl = await configureWebhook(instanceName);
+  check(await db().from("wa_instances").upsert({
+    instance_name: instanceName,
+    nome_conexao: nomeConexao || info.profileName || instanceName,
+    status: info.state,
+    numero: info.numero,
+    perfil_nome: info.profileName,
+    updated_at: (/* @__PURE__ */ new Date()).toISOString()
+  }, { onConflict: "instance_name" }), "gravar instância");
+  return { ...info, webhookUrl, warning: publicUrlWarning() };
+}
+app.get("/api/webhook/whatsapp", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+  if (mode && token) {
+    if (mode === "subscribe" && WHATSAPP_VERIFY_TOKEN && token === WHATSAPP_VERIFY_TOKEN) {
+      return res.status(200).send(challenge);
+    }
+    return res.sendStatus(403);
+  }
+  return res.sendStatus(400);
+});
+app.post("/api/whatsapp/onboarding", async (req, res) => {
+  const { code, waba_id, phone_number_id, type } = req.body;
+  if (!waba_id || !phone_number_id) {
+    return res.status(400).json({ error: "WABA ID and Phone Number ID are required" });
+  }
+  try {
+    let accessToken = process.env.WHATSAPP_TOKEN || "";
+    if (code && META_APP_ID && META_APP_SECRET) {
+      const tokenUrl = `https://graph.facebook.com/${GRAPH_API_VERSION}/oauth/access_token?client_id=${META_APP_ID}&client_secret=${META_APP_SECRET}&code=${code}`;
+      const tokenRes = await fetch(tokenUrl);
+      const tokenData = await tokenRes.json();
+      if (tokenRes.ok && tokenData.access_token) accessToken = tokenData.access_token;
+    }
+    const accountRecord = {
+      id: phone_number_id,
+      waba_id,
+      phone_number_id,
+      coexistence: type === "app",
+      access_token: accessToken,
+      status: "conectado",
+      created_at: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    if (supabaseAdmin) {
+      const { error } = await supabaseAdmin.from("whatsapp_accounts").upsert(accountRecord);
+      if (error) console.warn("Supabase whatsapp_accounts:", error.message);
+    }
+    return res.json({ success: true, account: { ...accountRecord, access_token: void 0 } });
+  } catch (err) {
+    return res.status(500).json({ error: errorMessage(err) });
+  }
+});
+app.post("/api/evolution/test", async (_req, res) => {
+  const result = {
+    success: false,
+    url: EVOLUTION_API_URL || "(não configurada)",
+    responded: false,
+    apiKeyAccepted: false,
+    version: null,
+    webhookBaseUrl: PUBLIC_BASE_URL || "(não configurada)",
+    supabaseConfigurado: Boolean(supabaseAdmin),
+    warning: publicUrlWarning()
+  };
+  try {
+    const root = await evo("/");
+    result.responded = true;
+    result.version = root?.version || "v2";
+  } catch (err) {
+    result.error = errorMessage(err);
+    return res.json(result);
+  }
+  try {
+    await evo("/instance/fetchInstances");
+    result.apiKeyAccepted = true;
+    result.success = true;
+  } catch (err) {
+    result.error = `O servidor respondeu, mas a chave foi recusada: ${errorMessage(err)}`;
+  }
+  return res.json(result);
+});
+app.get("/api/evolution/instances", async (_req, res) => {
+  try {
+    const list = pickArray(await evo("/instance/fetchInstances")).map((i) => i?.instance || i);
+    const instances = list.map((i) => {
+      const name = i?.name || i?.instanceName;
+      const owner = i?.ownerJid || i?.owner || i?.number || "";
+      return {
+        name,
+        instanceName: name,
+        connectionStatus: i?.connectionStatus || i?.state || i?.status || "close",
+        owner: formatPhone(owner),
+        number: formatPhone(owner),
+        profileName: i?.profileName || name
+      };
+    }).filter((i) => i.name);
+    return res.json({ success: true, instances });
+  } catch (err) {
+    return res.status(502).json({ error: errorMessage(err) });
+  }
+});
+app.post("/api/evolution/link", async (req, res) => {
+  const { instanceName, nomeConexao } = req.body || {};
+  if (!instanceName) return res.status(400).json({ error: "instanceName é obrigatório" });
+  try {
+    const info = await linkInstance(instanceName, nomeConexao);
+    return res.json({ success: true, ...info });
+  } catch (err) {
+    console.error("[Evolution link]", errorMessage(err));
+    return res.status(502).json({ error: errorMessage(err) });
+  }
+});
+app.post("/api/evolution/create", async (req, res) => {
+  const { instanceName, options } = req.body || {};
+  if (!instanceName) return res.status(400).json({ error: "instanceName é obrigatório" });
+  try {
+    try {
+      await evo("/instance/create", {
+        method: "POST",
+        body: {
+          instanceName,
+          integration: "WHATSAPP-BAILEYS",
+          qrcode: true,
+          groupsIgnore: options?.ignoreGroups ?? true,
+          rejectCall: options?.rejectCall ?? false,
+          alwaysOnline: false,
+          readMessages: false,
+          readStatus: false,
+          syncFullHistory: false
+        }
+      });
+    } catch (err) {
+      const already = err instanceof EvolutionError && [400, 403, 409].includes(err.status) && /already|exist|in use|em uso/i.test(err.message);
+      if (!already) throw err;
+    }
+    let webhookWarning = publicUrlWarning();
+    try {
+      await configureWebhook(instanceName);
+    } catch (err) {
+      webhookWarning = `Webhook não configurado: ${errorMessage(err)}`;
+      console.error("[Evolution create]", webhookWarning);
+    }
+    if (supabaseAdmin) {
+      const { error } = await supabaseAdmin.from("wa_instances").upsert({
+        instance_name: instanceName,
+        nome_conexao: options?.nomeConexao || instanceName,
+        status: "connecting",
+        updated_at: (/* @__PURE__ */ new Date()).toISOString()
+      }, { onConflict: "instance_name" });
+      if (error) console.warn("[Evolution create] Supabase:", error.message);
+    }
+    const connect = await evo(`/instance/connect/${enc(instanceName)}`);
+    if (connect?.instance?.state === "open") {
+      return res.json({ success: true, alreadyConnected: true, instanceName, warning: webhookWarning });
+    }
+    const qrBase64 = connect?.base64 || connect?.qrcode?.base64 || null;
+    if (!qrBase64) {
+      return res.status(502).json({ error: 'A Evolution não devolveu o QR Code. Clique em "Gerar Novo QR" em alguns segundos.' });
+    }
+    return res.json({ success: true, qrBase64, pairingCode: connect?.pairingCode || null, instanceName, warning: webhookWarning });
+  } catch (err) {
+    console.error("[Evolution create]", errorMessage(err));
+    return res.status(502).json({ error: errorMessage(err) });
+  }
+});
+app.post("/api/evolution/connect-qr", async (req, res) => {
+  const { instanceName } = req.body || {};
+  if (!instanceName) return res.status(400).json({ error: "instanceName é obrigatório" });
+  try {
+    const connect = await evo(`/instance/connect/${enc(instanceName)}`);
+    if (connect?.instance?.state === "open") return res.json({ success: true, alreadyConnected: true });
+    return res.json({ success: true, qrBase64: connect?.base64 || null, pairingCode: connect?.pairingCode || null });
+  } catch (err) {
+    return res.status(502).json({ error: errorMessage(err) });
+  }
+});
+app.post("/api/evolution/state", async (req, res) => {
+  const { instanceName, nomeConexao } = req.body || {};
+  if (!instanceName) return res.status(400).json({ error: "instanceName é obrigatório" });
+  try {
+    const info = await getInstanceInfo(instanceName);
+    if (info.state === "open") {
+      const linked = await linkInstance(instanceName, nomeConexao);
+      return res.json({ success: true, ...linked });
+    }
+    return res.json({ success: true, state: info.state });
+  } catch (err) {
+    return res.status(502).json({ error: errorMessage(err) });
+  }
+});
+app.post("/api/evolution/logout", async (req, res) => {
+  const { instanceName } = req.body || {};
+  try {
+    await evo(`/instance/logout/${enc(instanceName)}`, { method: "DELETE" });
+    if (supabaseAdmin) await supabaseAdmin.from("wa_instances").update({ status: "close" }).eq("instance_name", instanceName);
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(502).json({ error: errorMessage(err) });
+  }
+});
+app.post("/api/evolution/delete", async (req, res) => {
+  const { instanceName } = req.body || {};
+  try {
+    await evo(`/instance/delete/${enc(instanceName)}`, { method: "DELETE" });
+  } catch (err) {
+    if (!(err instanceof EvolutionError) || err.status !== 404) {
+      return res.status(502).json({ error: errorMessage(err) });
+    }
+  }
+  if (supabaseAdmin) await supabaseAdmin.from("wa_instances").delete().eq("instance_name", instanceName);
+  return res.json({ success: true });
+});
+app.get("/api/webhook/whatsapp-qr", (_req, res) => {
+  res.json({ ok: true, message: "Webhook do CRM acessível. A Evolution deve enviar POST para este endereço." });
+});
+app.post("/api/webhook/whatsapp-qr", async (req, res) => {
+  const body = req.body || {};
+  const event = String(body.event || "").toLowerCase().replace(/_/g, ".");
+  const instance = body.instance || body.instanceName || "";
+  const secret = req.get("x-webhook-secret") || (typeof req.query.token === "string" ? req.query.token : "");
+  if (EVOLUTION_WEBHOOK_SECRET && secret !== EVOLUTION_WEBHOOK_SECRET) {
+    console.warn(`[Webhook QR] segredo inválido (instância ${instance}, evento ${event})`);
+    await logWebhook(instance, event, false, "Segredo do webhook inválido");
+    return res.sendStatus(401);
+  }
+  try {
+    const data = body.data;
+    const items = Array.isArray(data) ? data : Array.isArray(data?.messages) ? data.messages : data ? [data] : [];
+    if (event === "messages.upsert" || event === "send.message") {
+      for (const msg of items) await saveIncomingMessage(instance, msg, true);
+    } else if (event === "messages.update") {
+      for (const item of items) await updateMessageStatus(item);
+    } else if (event === "connection.update") {
+      const state = data?.state;
+      if (state && supabaseAdmin) {
+        const update = { instance_name: instance, status: state, updated_at: (/* @__PURE__ */ new Date()).toISOString() };
+        if (data?.wuid) update.numero = formatPhone(data.wuid);
+        if (data?.profileName) update.perfil_nome = data.profileName;
+        await supabaseAdmin.from("wa_instances").upsert(update, { onConflict: "instance_name" });
+      }
+    } else if (event === "contacts.upsert" || event === "contacts.update") {
+      await updateContactNames(instance, items);
+    }
+    await logWebhook(instance, event, true);
+  } catch (err) {
+    console.error(`[Webhook QR] erro ao processar ${event}:`, errorMessage(err));
+    await logWebhook(instance, event, false, errorMessage(err));
+  }
+  return res.sendStatus(200);
+});
+app.post("/api/wa/send", async (req, res) => {
+  const { conversationId, text } = req.body || {};
+  if (!conversationId || !text || !String(text).trim()) {
+    return res.status(400).json({ error: "conversationId e text são obrigatórios" });
+  }
+  try {
+    const sb = db();
+    const conv = check(await sb.from("wa_conversations").select("*").eq("id", conversationId).maybeSingle(), "ler conversa");
+    if (!conv) return res.status(404).json({ error: "Conversa não encontrada no servidor." });
+    const number = conv.phone || conv.remote_jid;
+    const sent = await evo(`/message/sendText/${enc(conv.instance_name)}`, {
+      method: "POST",
+      body: { number, text, delay: 1200 }
+    });
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const messageId = sent?.key?.id || `crm-${Date.now()}`;
+    const status = mapStatus(sent?.status) || "enviada";
+    check(await sb.from("wa_messages").upsert({
+      id: messageId,
+      conversation_id: conversationId,
+      from_me: true,
+      tipo: "texto",
+      conteudo: text,
+      status,
+      enviada_at: now,
+      updated_at: now
+    }, { onConflict: "id" }), "gravar mensagem enviada");
+    check(await sb.from("wa_conversations").update({
+      ultima_mensagem: text,
+      ultima_mensagem_at: now,
+      nao_lidas: 0,
+      updated_at: now
+    }).eq("id", conversationId), "atualizar conversa");
+    return res.json({
+      success: true,
+      message: {
+        id: messageId,
+        conversationId,
+        direcao: "saida",
+        autor: "usuario",
+        tipo: "texto",
+        conteudo: text,
+        status,
+        enviadaAt: now
+      }
+    });
+  } catch (err) {
+    console.error("[WA send]", errorMessage(err));
+    return res.status(502).json({ error: errorMessage(err) });
+  }
+});
+app.get("/api/wa/feed", async (req, res) => {
+  if (!supabaseAdmin) return res.json({ conversations: [], messages: [], nextSince: null, hasMore: false, error: "Supabase não configurado" });
+  try {
+    const since = typeof req.query.since === "string" && req.query.since ? req.query.since : "1970-01-01T00:00:00.000Z";
+    const limit = 1e3;
+    const sb = db();
+    const convs = check(await sb.from("wa_conversations").select("*").gt("updated_at", since).order("updated_at", { ascending: true }).limit(limit), "feed conversas") || [];
+    const msgs = check(await sb.from("wa_messages").select("*").gt("updated_at", since).order("updated_at", { ascending: true }).limit(limit), "feed mensagens") || [];
+    const convTruncated = convs.length === limit;
+    const msgTruncated = msgs.length === limit;
+    const lastConv = convs.length ? convs[convs.length - 1].updated_at : since;
+    const lastMsg = msgs.length ? msgs[msgs.length - 1].updated_at : since;
+    const maxAll = [lastConv, lastMsg, since].sort().pop();
+    let nextSince = maxAll;
+    if (convTruncated) nextSince = lastConv < nextSince ? lastConv : nextSince;
+    if (msgTruncated) nextSince = lastMsg < nextSince ? lastMsg : nextSince;
+    return res.json({
+      conversations: convs.map((c) => ({
+        id: c.id,
+        canal: "whatsapp",
+        contactId: `wa-c-${waKey(c.remote_jid)}`,
+        leadId: `wa-l-${waKey(c.remote_jid)}`,
+        contactName: c.contact_name,
+        waPhone: c.phone,
+        waInstance: c.instance_name,
+        naoLidas: c.nao_lidas || 0,
+        ultimaMensagem: c.ultima_mensagem,
+        ultimaMensagemAt: c.ultima_mensagem_at || c.updated_at,
+        criarLead: Boolean(c.criar_lead)
+      })),
+      messages: msgs.map((m) => ({
+        id: m.id,
+        conversationId: m.conversation_id,
+        direcao: m.from_me ? "saida" : "entrada",
+        autor: m.from_me ? "usuario" : "contato",
+        tipo: m.tipo,
+        conteudo: m.conteudo,
+        status: m.status,
+        enviadaAt: m.enviada_at
+      })),
+      nextSince,
+      hasMore: convTruncated || msgTruncated
+    });
+  } catch (err) {
+    return res.status(500).json({ error: errorMessage(err) });
+  }
+});
+app.post("/api/evolution/sync", async (req, res) => {
+  const { instanceName } = req.body || {};
+  const limitChats = Math.min(Number(req.body?.limitChats) || (process.env.VERCEL ? 30 : 100), 500);
+  const limitMessages = Math.min(Number(req.body?.limitMessages) || 40, 200);
+  if (!instanceName) return res.status(400).json({ error: "instanceName é obrigatório" });
+  try {
+    const sb = db();
+    const chats = pickArray(await evo(`/chat/findChats/${enc(instanceName)}`, { method: "POST", body: {} })).filter((c) => !isIgnoredJid(c?.remoteJid || c?.id || "")).sort((a, b) => new Date(b?.updatedAt || 0).getTime() - new Date(a?.updatedAt || 0).getTime()).slice(0, limitChats);
+    let syncedChats = 0;
+    let syncedMessages = 0;
+    const errors = [];
+    for (const chat of chats) {
+      const chatJid = chat?.remoteJid || chat?.id;
+      try {
+        const data = await evo(`/chat/findMessages/${enc(instanceName)}`, {
+          method: "POST",
+          body: { where: { key: { remoteJid: chatJid } }, page: 1, offset: limitMessages, limit: limitMessages }
+        });
+        const records = pickArray(data).slice(0, limitMessages);
+        if (!records.length) continue;
+        const firstKey = records.find((r) => r?.key)?.key || { remoteJid: chatJid };
+        const { remoteJid, phone } = resolveJid({ ...firstKey, remoteJid: firstKey.remoteJid || chatJid });
+        const convId = conversationIdFor(instanceName, remoteJid);
+        const now = (/* @__PURE__ */ new Date()).toISOString();
+        const rows = records.map((r) => {
+          const content = extractContent(r?.message);
+          if (!content || !r?.key?.id) return null;
+          return {
+            id: r.key.id,
+            conversation_id: convId,
+            from_me: Boolean(r.key.fromMe),
+            tipo: content.tipo,
+            conteudo: content.conteudo,
+            status: mapStatus(r.status) || (r.key.fromMe ? "enviada" : "entregue"),
+            enviada_at: toIsoTimestamp(r.messageTimestamp),
+            updated_at: now
+          };
+        }).filter(Boolean);
+        if (!rows.length) continue;
+        const latest = rows.reduce((a, b) => a.enviada_at > b.enviada_at ? a : b);
+        const contactName = chat?.pushName || chat?.name || records.find((r) => !r?.key?.fromMe && r?.pushName)?.pushName || formatPhone(phone) || waKey(remoteJid);
+        const existing = check(await sb.from("wa_conversations").select("id, ultima_mensagem_at").eq("id", convId).maybeSingle(), "ler conversa");
+        const convRow = {
+          id: convId,
+          instance_name: instanceName,
+          remote_jid: remoteJid,
+          phone: phone || null,
+          contact_name: contactName,
+          updated_at: now
+        };
+        if (!existing?.ultima_mensagem_at || latest.enviada_at >= new Date(existing.ultima_mensagem_at).toISOString()) {
+          convRow.ultima_mensagem = latest.conteudo;
+          convRow.ultima_mensagem_at = latest.enviada_at;
+        }
+        check(await sb.from("wa_conversations").upsert(convRow, { onConflict: "id" }), "gravar conversa");
+        check(await sb.from("wa_messages").upsert(rows, { onConflict: "id", ignoreDuplicates: true }), "gravar mensagens");
+        syncedChats++;
+        syncedMessages += rows.length;
+      } catch (err) {
+        errors.push(`${chatJid}: ${errorMessage(err)}`);
+        if (errors.length >= 5 && syncedChats === 0) break;
+      }
+    }
+    return res.json({ success: true, syncedChats, syncedMessages, errors: errors.slice(0, 5) });
+  } catch (err) {
+    console.error("[Evolution sync]", errorMessage(err));
+    return res.status(502).json({ error: errorMessage(err) });
+  }
+});
+app.get("/api/crm/data", async (_req, res) => {
+  if (!supabaseAdmin) return res.status(503).json({ error: "Supabase não configurado no servidor" });
+  const { data, error } = await supabaseAdmin.from("wa_instances").select("*").order("created_at", { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  return res.json({
+    wa_qr_instances: (data || []).filter((i) => i.nome_conexao || i.numero).map((i) => ({
+      id: i.instance_name,
+      instance_name: i.instance_name,
+      nome_conexao: i.nome_conexao || i.instance_name,
+      status: i.status || "close",
+      numero: i.numero || "",
+      perfil_nome: i.perfil_nome || ""
+    }))
+  });
+});
+app.post("/api/crm/data", (_req, res) => res.json({ success: true }));
+app.get("/api/wa/diagnostics", async (req, res) => {
+  if (!EVOLUTION_WEBHOOK_SECRET || req.query.token !== EVOLUTION_WEBHOOK_SECRET) {
+    return res.status(401).json({ error: "Informe ?token= com o valor de EVOLUTION_WEBHOOK_SECRET" });
+  }
+  const instance = typeof req.query.instance === "string" ? req.query.instance : "";
+  const out = {
+    evolutionUrl: EVOLUTION_API_URL || "(não configurada)",
+    evolutionKeyConfigurada: Boolean(EVOLUTION_API_KEY),
+    webhookSecretConfigurado: Boolean(EVOLUTION_WEBHOOK_SECRET),
+    urlPublicaDoCrm: PUBLIC_BASE_URL || "(não configurada)",
+    aviso: publicUrlWarning(),
+    supabaseConfigurado: Boolean(supabaseAdmin)
+  };
+  try {
+    out.evolutionVersao = (await evo("/"))?.version || "respondeu";
+  } catch (err) {
+    out.evolutionErro = errorMessage(err);
+  }
+  if (instance) {
+    try {
+      out.estadoInstancia = await getInstanceInfo(instance);
+    } catch (err) {
+      out.estadoInstanciaErro = errorMessage(err);
+    }
+    try {
+      const wh = await evo(`/webhook/find/${enc(instance)}`);
+      out.webhookNaEvolution = wh ? { ...wh, url: String(wh.url || "").replace(/token=[^&]+/, "token=***"), headers: wh.headers ? "(definidos)" : null } : null;
+    } catch (err) {
+      out.webhookNaEvolutionErro = errorMessage(err);
+    }
+  }
+  if (supabaseAdmin) {
+    const counts = {};
+    for (const t of ["wa_instances", "wa_conversations", "wa_messages"]) {
+      const { count, error: error2 } = await supabaseAdmin.from(t).select("*", { count: "exact", head: true });
+      counts[t] = error2 ? `erro: ${error2.message}` : count;
+    }
+    out.registrosNoSupabase = counts;
+    const { data: logs, error } = await supabaseAdmin.from("wa_webhook_log").select("*").order("received_at", { ascending: false }).limit(20);
+    out.ultimosEventosDoWebhook = error ? `erro: ${error.message}` : logs;
+  }
+  return res.json(out);
+});
+var api_index_default = app;
+function logStartupWarnings() {
+  const warning = publicUrlWarning();
+  if (warning) console.warn(`[Config] ${warning}`);
+  if (!supabaseAdmin) console.warn("[Config] Supabase não configurado no servidor (SUPABASE_SERVICE_ROLE_KEY).");
+}
+export {
+  api_index_default as default,
+  logStartupWarnings
+};

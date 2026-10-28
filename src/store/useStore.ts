@@ -114,6 +114,138 @@ interface CRMState {
   refreshData: () => void;
 }
 
+// ==========================================
+// WHATSAPP VIA QR: junta no navegador o que chegou no servidor
+// ==========================================
+const WA_FEED_SINCE_KEY = 'conversa_crm_wa_feed_since_v1';
+const WA_EPOCH = '1970-01-01T00:00:00.000Z';
+
+const looksLikePhone = (name?: string) => !name || /^[+\d\s()-]+$/.test(name);
+
+function mergeWhatsAppFeed(feed: any) {
+  const serverConvs: any[] = Array.isArray(feed?.conversations) ? feed.conversations : [];
+  const serverMsgs: any[] = Array.isArray(feed?.messages) ? feed.messages : [];
+  if (serverConvs.length === 0 && serverMsgs.length === 0) return;
+
+  const now = new Date().toISOString();
+  const contacts = db.getContacts();
+  const leads = db.getLeads();
+  const conversations = db.getConversations();
+  const messages = db.getMessages();
+  const currentUser = db.getCurrentUser();
+
+  const pipelines = db.getPipelines();
+  const firstPipeline = pipelines[0];
+  const entryStage = firstPipeline?.stages.find(st => st.tipo === 'entrada') || firstPipeline?.stages[0];
+
+  const contactById = new Map(contacts.map((c, i) => [c.id, i]));
+  const leadById = new Map(leads.map((l, i) => [l.id, i]));
+  const convById = new Map(conversations.map((c, i) => [c.id, i]));
+
+  for (const sc of serverConvs) {
+    const phone = sc.waPhone ? `+${sc.waPhone}` : '';
+    const name = sc.contactName || phone || 'Contato WhatsApp';
+
+    // Contato
+    if (!contactById.has(sc.contactId)) {
+      contacts.push({
+        id: sc.contactId,
+        nome: name,
+        telefones: phone ? [phone] : [],
+        emails: [],
+        tags: [],
+        customFields: {},
+        canais: { whatsapp: phone || undefined },
+        consentimentoMarketing: false,
+        createdAt: now,
+        updatedAt: now
+      });
+      contactById.set(sc.contactId, contacts.length - 1);
+    } else {
+      const i = contactById.get(sc.contactId)!;
+      if (looksLikePhone(contacts[i].nome) && !looksLikePhone(sc.contactName)) {
+        contacts[i] = { ...contacts[i], nome: sc.contactName, updatedAt: now };
+      }
+    }
+
+    // Lead: só para conversas com mensagem nova recebida (não para o histórico importado)
+    let leadId: string | undefined = leadById.has(sc.leadId) ? sc.leadId : undefined;
+    if (!leadId && sc.criarLead && firstPipeline && entryStage) {
+      leads.push({
+        id: sc.leadId,
+        nome: name,
+        valor: 0,
+        pipelineId: firstPipeline.id,
+        stageId: entryStage.id,
+        responsavelId: currentUser?.id,
+        contactIds: [sc.contactId],
+        tags: [],
+        origemId: 'src-wa',
+        customFields: {},
+        produtos: [],
+        createdAt: now,
+        updatedAt: now,
+        ultimaInteracaoAt: sc.ultimaMensagemAt || now,
+        naoLidas: sc.naoLidas || 0
+      });
+      leadById.set(sc.leadId, leads.length - 1);
+      leadId = sc.leadId;
+    } else if (leadId) {
+      const i = leadById.get(leadId)!;
+      leads[i] = { ...leads[i], ultimaInteracaoAt: sc.ultimaMensagemAt || leads[i].ultimaInteracaoAt, naoLidas: sc.naoLidas || 0 };
+    }
+
+    // Conversa
+    if (convById.has(sc.id)) {
+      const i = convById.get(sc.id)!;
+      conversations[i] = {
+        ...conversations[i],
+        naoLidas: sc.naoLidas || 0,
+        ultimaMensagemAt: sc.ultimaMensagemAt || conversations[i].ultimaMensagemAt,
+        leadId: conversations[i].leadId || leadId
+      };
+    } else {
+      conversations.push({
+        id: sc.id,
+        canal: 'whatsapp',
+        contactId: sc.contactId,
+        leadId,
+        status: 'aberta',
+        naoLidas: sc.naoLidas || 0,
+        ultimaMensagemAt: sc.ultimaMensagemAt || now
+      });
+      convById.set(sc.id, conversations.length - 1);
+    }
+  }
+
+  // Mensagens: o servidor é a fonte da verdade (substitui pelo id)
+  const msgById = new Map(messages.map((m, i) => [m.id, i]));
+  for (const sm of serverMsgs) {
+    const msg: Message = {
+      id: sm.id,
+      conversationId: sm.conversationId,
+      direcao: sm.direcao,
+      autor: sm.autor,
+      tipo: sm.tipo,
+      conteudo: sm.conteudo,
+      status: sm.status,
+      enviadaAt: sm.enviadaAt
+    };
+    if (msgById.has(sm.id)) {
+      messages[msgById.get(sm.id)!] = msg;
+    } else {
+      messages.push(msg);
+      msgById.set(sm.id, messages.length - 1);
+    }
+  }
+  messages.sort((a, b) => new Date(a.enviadaAt).getTime() - new Date(b.enviadaAt).getTime());
+
+  db.saveContacts(contacts);
+  db.saveLeads(leads);
+  db.saveConversations(conversations);
+  db.saveMessages(messages);
+}
+
 export const useStore = create<CRMState>((set, get) => ({
   currentUser: db.getCurrentUser(),
   users: db.getUsers(),
@@ -207,7 +339,25 @@ export const useStore = create<CRMState>((set, get) => ({
     set(state => ({ toasts: state.toasts.filter(t => t.id !== id) }));
   },
 
-  refreshData: () => {
+  refreshData: async () => {
+    try {
+      const hasWaConversations = db.getConversations().some(c => c.id.startsWith('wa:'));
+      let since = hasWaConversations ? (localStorage.getItem(WA_FEED_SINCE_KEY) || WA_EPOCH) : WA_EPOCH;
+      for (let round = 0; round < 10; round++) {
+        const res = await fetch(`/api/wa/feed?since=${encodeURIComponent(since)}`);
+        if (!res.ok) break;
+        const feed = await res.json();
+        mergeWhatsAppFeed(feed);
+        if (feed.nextSince) {
+          since = feed.nextSince;
+          localStorage.setItem(WA_FEED_SINCE_KEY, since);
+        }
+        if (!feed.hasMore) break;
+      }
+    } catch (err) {
+      console.warn('[WhatsApp feed]', err);
+    }
+
     set({
       users: db.getUsers(),
       pipelines: db.getPipelines(),
@@ -407,11 +557,48 @@ export const useStore = create<CRMState>((set, get) => ({
     const conversations = get().conversations.map(c => c.id === conversationId ? {
       ...c,
       ultimaMensagemAt: new Date().toISOString(),
-      naoLidas: direcao === 'entrada' ? c.naoLidas + 1 : c.naoLidas
+      naoLidas: direcao === 'entrada' ? c.naoLidas + 1 : (direcao === 'saida' && conversationId.startsWith('wa:') ? 0 : c.naoLidas)
     } : c);
     db.saveConversations(conversations);
 
     set({ messages, conversations });
+
+    // Conversas do WhatsApp via QR: envia de verdade pelo servidor (Evolution API)
+    if (conversationId.startsWith('wa:') && direcao === 'saida' && autor === 'usuario') {
+      const markFailed = (reason: string) => {
+        const updated = get().messages.map(m => m.id === newMessage.id ? { ...m, status: 'falhou' as const } : m);
+        db.saveMessages(updated);
+        set({ messages: updated });
+        get().addToast('Mensagem não enviada', reason, 'error');
+      };
+
+      if (tipo !== 'texto' || (anexos && anexos.length > 0)) {
+        markFailed('Por enquanto, o WhatsApp via QR Code envia apenas mensagens de texto.');
+        return;
+      }
+
+      fetch('/api/wa/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ conversationId, text: conteudo })
+      })
+        .then(async res => {
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.error || `Erro ${res.status} ao enviar`);
+          return data;
+        })
+        .then(data => {
+          const serverMsg = data.message;
+          const replaced = get().messages.map(m => m.id === newMessage.id
+            ? { ...m, id: serverMsg?.id || m.id, status: serverMsg?.status || m.status }
+            : m);
+          const seen = new Set<string>();
+          const deduped = replaced.filter(m => (seen.has(m.id) ? false : (seen.add(m.id), true)));
+          db.saveMessages(deduped);
+          set({ messages: deduped });
+        })
+        .catch(err => markFailed(err?.message || 'Falha ao enviar pelo WhatsApp.'));
+    }
   },
 
   createConversation: (contactId, leadId, canal = 'whatsapp') => {

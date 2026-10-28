@@ -27,30 +27,6 @@ export const ConfiguracoesPage: React.FC = () => {
   const [etplAssunto, setEtplAssunto] = useState('');
   const [etplCorpo, setEtplCorpo] = useState('');
 
-  const handleRestore = () => {
-    restoreSeed();
-    setToastMsg('Dados de exemplo restaurados com sucesso!');
-    setTimeout(() => setToastMsg(null), 3000);
-  };
-
-  const handleClear = () => {
-    if (window.confirm('Tem certeza que deseja apagar todos os dados e restaurar o padrão?')) {
-      clearAllData();
-      setToastMsg('Sistema limpo e restaurado!');
-      setTimeout(() => setToastMsg(null), 3000);
-    }
-  };
-
-  const handleExport = () => {
-    const json = db.exportBackup();
-    const blob = new Blob([json], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `conversa_crm_backup_${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-  };
-
   const handleCreateTemplate = (e: React.FormEvent) => {
     e.preventDefault();
     if (!tplNome.trim() || !tplCorpo.trim()) return;

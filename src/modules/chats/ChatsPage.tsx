@@ -13,8 +13,16 @@ import { WhatsAppPluginModal } from './WhatsAppPluginModal';
 export const ChatsPage: React.FC = () => {
   const { 
     conversations, contacts, messages, users, sendMessage, 
-    simulateClientIncomingMessage, updateConversationStatus, assignConversation, markConversationUnread 
+    simulateClientIncomingMessage, updateConversationStatus, assignConversation, markConversationUnread, refreshData 
   } = useStore();
+
+  useEffect(() => {
+    refreshData();
+    const interval = setInterval(() => {
+      refreshData();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [refreshData]);
 
   const [activeTab, setActiveTab] = useState<'clientes' | 'equipe'>('clientes');
   const [selectedConvId, setSelectedConvId] = useState<string>(conversations[0]?.id || '');

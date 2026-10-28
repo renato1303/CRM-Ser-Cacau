@@ -319,6 +319,14 @@ export const db = {
     localStorage.setItem(STORAGE_KEYS.EMAIL_TEMPLATES, JSON.stringify([]));
     localStorage.setItem(STORAGE_KEYS.AUTOMATION_RULES, JSON.stringify([]));
     localStorage.setItem(STORAGE_KEYS.SALES_BOTS, JSON.stringify([]));
+  },
+
+  getWaQrInstances: (): any[] => {
+    const data = localStorage.getItem('conversa_crm_wa_qr_instances_v1');
+    return data ? JSON.parse(data) : [];
+  },
+  saveWaQrInstances: (items: any[]) => {
+    localStorage.setItem('conversa_crm_wa_qr_instances_v1', JSON.stringify(items));
   }
 };
 
