@@ -58,13 +58,52 @@ export const ChatsPage: React.FC = () => {
   const activeContact = contacts.find(c => c.id === activeConv?.contactId);
   const activeMessages = messages.filter(m => m.conversationId === activeConv?.id);
 
+  // Última mensagem de cada conversa (prévia na lista)
+  const lastMessageByConv = React.useMemo(() => {
+    const map = new Map<string, (typeof messages)[number]>();
+    for (const m of messages) {
+      const current = map.get(m.conversationId);
+      if (!current || new Date(m.enviadaAt).getTime() >= new Date(current.enviadaAt).getTime()) {
+        map.set(m.conversationId, m);
+      }
+    }
+    return map;
+  }, [messages]);
+
+  const formatListTime = (iso: string) => {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    const isToday = d.toDateString() === new Date().toDateString();
+    return isToday
+      ? d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+      : d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+  };
+
+  const openConversation = (convId: string) => {
+    setSelectedConvId(convId);
+    const conv = conversations.find(c => c.id === convId);
+    if (conv && conv.id.startsWith('wa:') && conv.naoLidas > 0) {
+      fetch('/api/wa/read', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ conversationId: convId })
+      })
+        .then(() => refreshData())
+        .catch(() => {});
+    }
+  };
+
   const filteredConversations = conversations.filter(c => {
     const contact = contacts.find(ct => ct.id === c.contactId);
-    const matchesSearch = contact?.nome.toLowerCase().includes(searchQuery.toLowerCase()) || false;
+    const query = searchQuery.toLowerCase().trim();
+    const queryDigits = query.replace(/\D/g, '');
+    const matchesSearch = !query
+      || (contact?.nome || '').toLowerCase().includes(query)
+      || (queryDigits.length > 0 && (contact?.telefones || []).some(t => t.replace(/\D/g, '').includes(queryDigits)));
     if (filterType === 'nao_lidas') return matchesSearch && c.naoLidas > 0;
     if (filterType === 'minhas') return matchesSearch && c.responsavelId === users[0].id;
     return matchesSearch;
-  });
+  }).sort((a, b) => new Date(b.ultimaMensagemAt).getTime() - new Date(a.ultimaMensagemAt).getTime());
 
   return (
     <div className="flex-1 flex h-full overflow-hidden bg-slate-50 dark:bg-slate-950">
@@ -125,7 +164,7 @@ export const ChatsPage: React.FC = () => {
               return (
                 <div
                   key={conv.id}
-                  onClick={() => setSelectedConvId(conv.id)}
+                  onClick={() => openConversation(conv.id)}
                   className={`p-4 flex items-start gap-3 cursor-pointer transition-colors ${
                     isSelected ? 'bg-indigo-50/50 dark:bg-indigo-950/30' : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'
                   }`}
@@ -137,9 +176,15 @@ export const ChatsPage: React.FC = () => {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between mb-1">
                       <p className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate">{contact?.nome || 'Contato'}</p>
-                      <span className="text-[10px] text-slate-400">{new Date(conv.ultimaMensagemAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span>
+                      <span className="text-[10px] text-slate-400">{formatListTime(lastMessageByConv.get(conv.id)?.enviadaAt || conv.ultimaMensagemAt)}</span>
                     </div>
-                    <p className="text-xs text-slate-500 dark:text-slate-400 truncate">Clique para abrir chat unificado...</p>
+                    <p className={`text-xs truncate ${conv.naoLidas > 0 ? 'text-slate-900 dark:text-slate-100 font-semibold' : 'text-slate-500 dark:text-slate-400'}`}>
+                      {(() => {
+                        const last = lastMessageByConv.get(conv.id);
+                        if (!last) return 'Sem mensagens';
+                        return `${last.direcao === 'saida' ? 'Você: ' : ''}${last.conteudo}`;
+                      })()}
+                    </p>
                   </div>
                   {conv.naoLidas > 0 && (
                     <span className="px-2 py-0.5 text-[10px] font-bold bg-indigo-600 text-white rounded-full">

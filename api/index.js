@@ -617,6 +617,16 @@ app.post("/api/wa/send", async (req, res) => {
     return res.status(502).json({ error: errorMessage(err) });
   }
 });
+app.post("/api/wa/read", async (req, res) => {
+  const { conversationId } = req.body || {};
+  if (!conversationId) return res.status(400).json({ error: "conversationId é obrigatório" });
+  try {
+    check(await db().from("wa_conversations").update({ nao_lidas: 0, updated_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("id", conversationId).gt("nao_lidas", 0), "marcar como lida");
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(502).json({ error: errorMessage(err) });
+  }
+});
 app.get("/api/wa/feed", async (req, res) => {
   if (!supabaseAdmin) return res.json({ conversations: [], messages: [], nextSince: null, hasMore: false, error: "Supabase não configurado" });
   try {
