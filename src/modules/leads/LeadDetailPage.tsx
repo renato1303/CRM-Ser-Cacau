@@ -132,7 +132,7 @@ export const LeadDetailPage: React.FC<LeadDetailPageProps> = ({ leadId }) => {
         <Tabs
           tabs={[
             { id: 'principal', label: 'Principal' },
-            { id: 'estatisticas', label: 'Estatísticas' },
+            { id: 'estatisticas', label: 'Rastreamento' },
             { id: 'produtos', label: 'Produtos' },
           ]}
           activeTab={activeTab}
@@ -184,14 +184,76 @@ export const LeadDetailPage: React.FC<LeadDetailPageProps> = ({ leadId }) => {
           </div>
         )}
 
-        {activeTab === 'estatisticas' && (
-          <div className="space-y-4 text-xs text-slate-600 dark:text-slate-300">
-            <p><span className="font-semibold">Criado em:</span> {formatDate(lead.createdAt)}</p>
-            <p><span className="font-semibold">Última Interação:</span> {formatDate(lead.ultimaInteracaoAt)}</p>
-            <p><span className="font-semibold">Origem:</span> WhatsApp Direct / UTM Google</p>
-            <p><span className="font-semibold">Tempo médio de resposta:</span> 4m 12s</p>
-          </div>
-        )}
+        {activeTab === 'estatisticas' && (() => {
+          const r = lead.rastreamento || {};
+          const q = lead.qualificacao || {};
+          // Tempo de resposta real, calculado pelas mensagens das conversas deste lead
+          const convIds = new Set(conversations.filter(c => c.leadId === lead.id || lead.contactIds.includes(c.contactId)).map(c => c.id));
+          const msgs = messages
+            .filter(m => convIds.has(m.conversationId))
+            .sort((a, b) => new Date(a.enviadaAt).getTime() - new Date(b.enviadaAt).getTime());
+          const waits: number[] = [];
+          let waitingSince: number | null = null;
+          for (const m of msgs) {
+            const t = new Date(m.enviadaAt).getTime();
+            if (m.direcao === 'entrada') { if (waitingSince === null) waitingSince = t; }
+            else if (m.direcao === 'saida' && waitingSince !== null) { waits.push(t - waitingSince); waitingSince = null; }
+          }
+          const fmt = (ms?: number) => {
+            if (ms === undefined) return '—';
+            const min = Math.round(ms / 60000);
+            if (min < 60) return `${min} min`;
+            const h = Math.floor(min / 60);
+            return h < 24 ? `${h} h ${min % 60} min` : `${Math.floor(h / 24)} d ${h % 24} h`;
+          };
+          const avg = waits.length ? waits.reduce((a, b) => a + b, 0) / waits.length : undefined;
+          const Row = ({ label, value }: { label: string; value?: any }) => (
+            <div className="flex justify-between gap-3 py-1.5 border-b border-slate-100 dark:border-slate-800 last:border-0">
+              <span className="text-slate-500 shrink-0">{label}</span>
+              <span className="font-medium text-slate-900 dark:text-slate-100 text-right break-words">
+                {typeof value === 'object' && value !== null ? (value.nome || value.id || JSON.stringify(value)) : (value || '—')}
+              </span>
+            </div>
+          );
+          return (
+            <div className="space-y-5 text-xs">
+              <div>
+                <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Rastreamento</h4>
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-800">
+                  <Row label="Entrada" value={r.dataEntrada ? formatDate(r.dataEntrada) : formatDate(lead.createdAt)} />
+                  <Row label="Fonte" value={r.fonte} />
+                  <Row label="Plataforma" value={r.plataforma} />
+                  <Row label="Posicionamento" value={r.posicionamento} />
+                  <Row label="Campanha" value={r.campanha} />
+                  <Row label="Conjunto" value={r.conjunto} />
+                  <Row label="Anúncio" value={r.anuncio} />
+                  <Row label="ID do anúncio" value={r.anuncioId} />
+                  <Row label="ID na planilha" value={lead.planilhaId} />
+                </div>
+              </div>
+              <div>
+                <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Qualificação</h4>
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-800">
+                  <Row label="Segmento" value={q.segmento} />
+                  <Row label="Faturamento" value={q.faturamento} />
+                  <Row label="Já trabalhou com cacau?" value={q.jaTrabalhouCacau} />
+                  <Row label="Score" value={q.score !== null && q.score !== undefined ? `${q.score}%` : undefined} />
+                  <Row label="UF / DDD" value={[q.uf, q.ddd].filter(Boolean).join(' · ')} />
+                  <Row label="Região" value={q.regiao} />
+                </div>
+              </div>
+              <div>
+                <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Atendimento</h4>
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-800">
+                  <Row label="Última interação" value={formatDate(lead.ultimaInteracaoAt)} />
+                  <Row label="Mensagens" value={String(msgs.length)} />
+                  <Row label="1ª resposta" value={fmt(waits[0])} />
+                  <Row label="Tempo médio de resposta" value={fmt(avg)} />
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         {activeTab === 'produtos' && (
           <div className="space-y-3">

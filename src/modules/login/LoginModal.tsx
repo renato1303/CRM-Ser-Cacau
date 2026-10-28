@@ -28,7 +28,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
       <form onSubmit={handleLogin} className="space-y-4">
         <div className="bg-indigo-50 dark:bg-indigo-950/50 p-4 rounded-xl border border-indigo-100 dark:border-indigo-900 text-xs text-indigo-700 dark:text-indigo-300">
           <p className="font-semibold mb-1">Modo de Demonstração / Teste de Permissões</p>
-          <p>Selecione abaixo um dos usuários de exemplo para testar diferentes perfis (Admin, Gerente, Vendedor) com senha padrão <span className="font-bold">123456</span> (ou <span className="font-bold">Remah13032019</span> para o Master).</p>
+          <p>Selecione abaixo o perfil com o qual deseja visualizar o CRM (Admin, Gerente, Vendedor). O acesso continua com o login atual.</p>
         </div>
 
         <div className="space-y-2">

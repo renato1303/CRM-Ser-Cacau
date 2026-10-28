@@ -9,6 +9,12 @@ import {
   initialMessages, initialChannels, initialActivityEvents, initialMessageTemplates, 
   initialEmails, initialEmailTemplates, initialAutomationRules, initialSalesBots 
 } from './seed';
+import { queueSync, rebaseAfterLocalReset, pushAllLocal, pullCrmChanges } from './sync';
+
+try {
+  void pullCrmChanges();
+  setInterval(() => { void pullCrmChanges(); }, 8000);
+} catch {}
 
 const STORAGE_KEYS = {
   USERS: 'conversa_crm_users_v1',
@@ -42,7 +48,10 @@ export const db = {
     const data = localStorage.getItem(STORAGE_KEYS.USERS);
     return data ? JSON.parse(data) : initialUsers;
   },
-  saveUsers: (items: User[]) => localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(items)),
+  saveUsers: (items: User[]) => {
+    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(items));
+    queueSync('users', items);
+  },
 
   getTeams: (): Team[] => {
     const data = localStorage.getItem(STORAGE_KEYS.TEAMS);
@@ -58,13 +67,19 @@ export const db = {
     const data = localStorage.getItem(STORAGE_KEYS.PIPELINES);
     return data ? JSON.parse(data) : initialPipelines;
   },
-  savePipelines: (items: Pipeline[]) => localStorage.setItem(STORAGE_KEYS.PIPELINES, JSON.stringify(items)),
+  savePipelines: (items: Pipeline[]) => {
+    localStorage.setItem(STORAGE_KEYS.PIPELINES, JSON.stringify(items));
+    queueSync('pipelines', items);
+  },
 
   getTags: (): Tag[] => {
     const data = localStorage.getItem(STORAGE_KEYS.TAGS);
     return data ? JSON.parse(data) : initialTags;
   },
-  saveTags: (items: Tag[]) => localStorage.setItem(STORAGE_KEYS.TAGS, JSON.stringify(items)),
+  saveTags: (items: Tag[]) => {
+    localStorage.setItem(STORAGE_KEYS.TAGS, JSON.stringify(items));
+    queueSync('tags', items);
+  },
 
   getSources: (): LeadSource[] => {
     const data = localStorage.getItem(STORAGE_KEYS.SOURCES);
@@ -80,25 +95,37 @@ export const db = {
     const data = localStorage.getItem(STORAGE_KEYS.COMPANIES);
     return data ? JSON.parse(data) : [];
   },
-  saveCompanies: (items: Company[]) => localStorage.setItem(STORAGE_KEYS.COMPANIES, JSON.stringify(items)),
+  saveCompanies: (items: Company[]) => {
+    localStorage.setItem(STORAGE_KEYS.COMPANIES, JSON.stringify(items));
+    queueSync('companies', items);
+  },
 
   getProducts: (): Product[] => {
     const data = localStorage.getItem(STORAGE_KEYS.PRODUCTS);
     return data ? JSON.parse(data) : [];
   },
-  saveProducts: (items: Product[]) => localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(items)),
+  saveProducts: (items: Product[]) => {
+    localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(items));
+    queueSync('products', items);
+  },
 
   getContacts: (): Contact[] => {
     const data = localStorage.getItem(STORAGE_KEYS.CONTACTS);
     return data ? JSON.parse(data) : [];
   },
-  saveContacts: (items: Contact[]) => localStorage.setItem(STORAGE_KEYS.CONTACTS, JSON.stringify(items)),
+  saveContacts: (items: Contact[]) => {
+    localStorage.setItem(STORAGE_KEYS.CONTACTS, JSON.stringify(items));
+    queueSync('contacts', items);
+  },
 
   getLeads: (): Lead[] => {
     const data = localStorage.getItem(STORAGE_KEYS.LEADS);
     return data ? JSON.parse(data) : [];
   },
-  saveLeads: (items: Lead[]) => localStorage.setItem(STORAGE_KEYS.LEADS, JSON.stringify(items)),
+  saveLeads: (items: Lead[]) => {
+    localStorage.setItem(STORAGE_KEYS.LEADS, JSON.stringify(items));
+    queueSync('leads', items);
+  },
 
   getTasks: (): Task[] => {
     const version = localStorage.getItem('conversa_crm_schema_version');
@@ -120,30 +147,41 @@ export const db = {
       }));
       localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(migrated));
       localStorage.setItem('conversa_crm_schema_version', '2');
+      queueSync('tasks', migrated);
       return migrated;
     }
 
     return existing;
   },
-  saveTasks: (items: Task[]) => localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(items)),
+  saveTasks: (items: Task[]) => {
+    localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(items));
+    queueSync('tasks', items);
+  },
 
   getNotes: (): Note[] => {
     const data = localStorage.getItem(STORAGE_KEYS.NOTES);
     return data ? JSON.parse(data) : [];
   },
-  saveNotes: (items: Note[]) => localStorage.setItem(STORAGE_KEYS.NOTES, JSON.stringify(items)),
+  saveNotes: (items: Note[]) => {
+    localStorage.setItem(STORAGE_KEYS.NOTES, JSON.stringify(items));
+    queueSync('notes', items);
+  },
 
   getConversations: (): Conversation[] => {
     const data = localStorage.getItem(STORAGE_KEYS.CONVERSATIONS);
     return data ? JSON.parse(data) : [];
   },
-  saveConversations: (items: Conversation[]) => localStorage.setItem(STORAGE_KEYS.CONVERSATIONS, JSON.stringify(items)),
+  saveConversations: (items: Conversation[]) => {
+    localStorage.setItem(STORAGE_KEYS.CONVERSATIONS, JSON.stringify(items));
+  },
 
   getMessages: (): Message[] => {
     const data = localStorage.getItem(STORAGE_KEYS.MESSAGES);
     return data ? JSON.parse(data) : [];
   },
-  saveMessages: (items: Message[]) => localStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify(items)),
+  saveMessages: (items: Message[]) => {
+    localStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify(items));
+  },
 
   getChannels: (): Channel[] => {
     const data = localStorage.getItem(STORAGE_KEYS.CHANNELS);
@@ -154,37 +192,54 @@ export const db = {
     const data = localStorage.getItem(STORAGE_KEYS.ACTIVITIES);
     return data ? JSON.parse(data) : [];
   },
-  saveActivities: (items: ActivityEvent[]) => localStorage.setItem(STORAGE_KEYS.ACTIVITIES, JSON.stringify(items)),
+  saveActivities: (items: ActivityEvent[]) => {
+    localStorage.setItem(STORAGE_KEYS.ACTIVITIES, JSON.stringify(items));
+    queueSync('activities', items);
+  },
 
   getMessageTemplates: (): MessageTemplate[] => {
     const data = localStorage.getItem(STORAGE_KEYS.MESSAGE_TEMPLATES);
     return data ? JSON.parse(data) : [];
   },
-  saveMessageTemplates: (items: MessageTemplate[]) => localStorage.setItem(STORAGE_KEYS.MESSAGE_TEMPLATES, JSON.stringify(items)),
+  saveMessageTemplates: (items: MessageTemplate[]) => {
+    localStorage.setItem(STORAGE_KEYS.MESSAGE_TEMPLATES, JSON.stringify(items));
+    queueSync('messageTemplates', items);
+  },
 
   getEmails: (): EmailMessage[] => {
     const data = localStorage.getItem(STORAGE_KEYS.EMAILS);
     return data ? JSON.parse(data) : [];
   },
-  saveEmails: (items: EmailMessage[]) => localStorage.setItem(STORAGE_KEYS.EMAILS, JSON.stringify(items)),
+  saveEmails: (items: EmailMessage[]) => {
+    localStorage.setItem(STORAGE_KEYS.EMAILS, JSON.stringify(items));
+  },
 
   getEmailTemplates: (): EmailTemplate[] => {
     const data = localStorage.getItem(STORAGE_KEYS.EMAIL_TEMPLATES);
     return data ? JSON.parse(data) : [];
   },
-  saveEmailTemplates: (items: EmailTemplate[]) => localStorage.setItem(STORAGE_KEYS.EMAIL_TEMPLATES, JSON.stringify(items)),
+  saveEmailTemplates: (items: EmailTemplate[]) => {
+    localStorage.setItem(STORAGE_KEYS.EMAIL_TEMPLATES, JSON.stringify(items));
+    queueSync('emailTemplates', items);
+  },
 
   getAutomationRules: (): AutomationRule[] => {
     const data = localStorage.getItem(STORAGE_KEYS.AUTOMATION_RULES);
     return data ? JSON.parse(data) : [];
   },
-  saveAutomationRules: (items: AutomationRule[]) => localStorage.setItem(STORAGE_KEYS.AUTOMATION_RULES, JSON.stringify(items)),
+  saveAutomationRules: (items: AutomationRule[]) => {
+    localStorage.setItem(STORAGE_KEYS.AUTOMATION_RULES, JSON.stringify(items));
+    queueSync('automationRules', items);
+  },
 
   getSalesBots: (): SalesBot[] => {
     const data = localStorage.getItem(STORAGE_KEYS.SALES_BOTS);
     return data ? JSON.parse(data) : [];
   },
-  saveSalesBots: (items: SalesBot[]) => localStorage.setItem(STORAGE_KEYS.SALES_BOTS, JSON.stringify(items)),
+  saveSalesBots: (items: SalesBot[]) => {
+    localStorage.setItem(STORAGE_KEYS.SALES_BOTS, JSON.stringify(items));
+    queueSync('salesBots', items);
+  },
 
   getTaskTypes: (): TaskTypeConfig[] => {
     const data = localStorage.getItem('conversa_crm_task_types_v2');
@@ -200,31 +255,32 @@ export const db = {
     localStorage.setItem('conversa_crm_task_types_v2', JSON.stringify(defaults));
     return defaults;
   },
-  saveTaskTypes: (types: TaskTypeConfig[]) => localStorage.setItem('conversa_crm_task_types_v2', JSON.stringify(types)),
 
   getTaskOutcomes: (): TaskOutcomeConfig[] => {
-    const data = localStorage.getItem('conversa_crm_task_outcomes_v2');
+    const data = localStorage.getItem('conversa_crm_task_outcomes_v1');
     if (data) return JSON.parse(data);
     const defaults: TaskOutcomeConfig[] = [
-      { id: 'out-1', nome: 'Atendeu' },
-      { id: 'out-2', nome: 'Não atendeu' },
-      { id: 'out-3', nome: 'Reagendar' },
-      { id: 'out-4', nome: 'Sem interesse' },
-      { id: 'out-5', nome: 'Proposta aceita' },
+      { id: 'to-sucesso', nome: 'Contato realizado com sucesso' },
+      { id: 'to-caixa', nome: 'Caixa postal / Não atendimento' },
+      { id: 'to-ocupado', nome: 'Número ocupado' },
+      { id: 'to-retornar', nome: 'Pediu para retornar depois' },
+      { id: 'to-reuniao', nome: 'Reunião agendada' },
+      { id: 'to-recusou', nome: 'Recusou a proposta' },
     ];
-    localStorage.setItem('conversa_crm_task_outcomes_v2', JSON.stringify(defaults));
+    localStorage.setItem('conversa_crm_task_outcomes_v1', JSON.stringify(defaults));
     return defaults;
   },
-  saveTaskOutcomes: (outcomes: TaskOutcomeConfig[]) => localStorage.setItem('conversa_crm_task_outcomes_v2', JSON.stringify(outcomes)),
 
   getCurrentUser: (): User => {
     const data = localStorage.getItem(STORAGE_KEYS.CURRENT_USER);
-    if (data) {
-      try { return JSON.parse(data); } catch { /* ignore */ }
-    }
-    return initialUsers[0];
+    if (data) return JSON.parse(data);
+    const user = initialUsers[0];
+    localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(user));
+    return user;
   },
-  setCurrentUser: (user: User) => localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(user)),
+  setCurrentUser: (user: User) => {
+    localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(user));
+  },
 
   restoreSeed: () => {
     localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(initialUsers));
@@ -234,47 +290,22 @@ export const db = {
     localStorage.setItem(STORAGE_KEYS.TAGS, JSON.stringify(initialTags));
     localStorage.setItem(STORAGE_KEYS.SOURCES, JSON.stringify(initialSources));
     localStorage.setItem(STORAGE_KEYS.LOSS_REASONS, JSON.stringify(initialLossReasons));
+    localStorage.setItem(STORAGE_KEYS.COMPANIES, JSON.stringify(initialCompanies));
+    localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(initialProducts));
+    localStorage.setItem(STORAGE_KEYS.CONTACTS, JSON.stringify(initialContacts));
+    localStorage.setItem(STORAGE_KEYS.LEADS, JSON.stringify(initialLeads));
+    localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(initialTasks));
+    localStorage.setItem(STORAGE_KEYS.NOTES, JSON.stringify(initialNotes));
+    localStorage.setItem(STORAGE_KEYS.CONVERSATIONS, JSON.stringify(initialConversations));
+    localStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify(initialMessages));
     localStorage.setItem(STORAGE_KEYS.CHANNELS, JSON.stringify(initialChannels));
-    localStorage.setItem(STORAGE_KEYS.COMPANIES, JSON.stringify([]));
-    localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify([]));
-    localStorage.setItem(STORAGE_KEYS.CONTACTS, JSON.stringify([]));
-    localStorage.setItem(STORAGE_KEYS.LEADS, JSON.stringify([]));
-    localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify([]));
-    localStorage.setItem(STORAGE_KEYS.NOTES, JSON.stringify([]));
-    localStorage.setItem(STORAGE_KEYS.CONVERSATIONS, JSON.stringify([]));
-    localStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify([]));
-    localStorage.setItem(STORAGE_KEYS.ACTIVITIES, JSON.stringify([]));
-    localStorage.setItem(STORAGE_KEYS.MESSAGE_TEMPLATES, JSON.stringify([]));
-    localStorage.setItem(STORAGE_KEYS.EMAILS, JSON.stringify([]));
-    localStorage.setItem(STORAGE_KEYS.EMAIL_TEMPLATES, JSON.stringify([]));
-    localStorage.setItem(STORAGE_KEYS.AUTOMATION_RULES, JSON.stringify([]));
-    localStorage.setItem(STORAGE_KEYS.SALES_BOTS, JSON.stringify([]));
-    localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(initialUsers[0]));
-  },
-
-  exportBackup: (): string => {
-    const backup = {
-      users: db.getUsers(),
-      pipelines: db.getPipelines(),
-      tags: db.getTags(),
-      companies: db.getCompanies(),
-      products: db.getProducts(),
-      contacts: db.getContacts(),
-      leads: db.getLeads(),
-      tasks: db.getTasks(),
-      notes: db.getNotes(),
-      conversations: db.getConversations(),
-      messages: db.getMessages(),
-      activities: db.getActivities(),
-      templates: db.getMessageTemplates(),
-      emails: db.getEmails(),
-      emailTemplates: db.getEmailTemplates(),
-      automationRules: db.getAutomationRules(),
-      salesBots: db.getSalesBots(),
-      version: '1.0',
-      exportedAt: new Date().toISOString(),
-    };
-    return JSON.stringify(backup, null, 2);
+    localStorage.setItem(STORAGE_KEYS.ACTIVITIES, JSON.stringify(initialActivityEvents));
+    localStorage.setItem(STORAGE_KEYS.MESSAGE_TEMPLATES, JSON.stringify(initialMessageTemplates));
+    localStorage.setItem(STORAGE_KEYS.EMAILS, JSON.stringify(initialEmails));
+    localStorage.setItem(STORAGE_KEYS.EMAIL_TEMPLATES, JSON.stringify(initialEmailTemplates));
+    localStorage.setItem(STORAGE_KEYS.AUTOMATION_RULES, JSON.stringify(initialAutomationRules));
+    localStorage.setItem(STORAGE_KEYS.SALES_BOTS, JSON.stringify(initialSalesBots));
+    rebaseAfterLocalReset();
   },
 
   importBackup: (jsonString: string): boolean => {
@@ -293,6 +324,7 @@ export const db = {
       if (data.emailTemplates) localStorage.setItem(STORAGE_KEYS.EMAIL_TEMPLATES, JSON.stringify(data.emailTemplates));
       if (data.automationRules) localStorage.setItem(STORAGE_KEYS.AUTOMATION_RULES, JSON.stringify(data.automationRules));
       if (data.salesBots) localStorage.setItem(STORAGE_KEYS.SALES_BOTS, JSON.stringify(data.salesBots));
+      pushAllLocal();
       return true;
     } catch {
       return false;
@@ -302,6 +334,7 @@ export const db = {
   clearAll: () => {
     Object.values(STORAGE_KEYS).forEach(key => localStorage.removeItem(key));
     db.restoreSeed();
+    rebaseAfterLocalReset();
   },
 
   clearAllCompletely: () => {
@@ -319,6 +352,7 @@ export const db = {
     localStorage.setItem(STORAGE_KEYS.EMAIL_TEMPLATES, JSON.stringify([]));
     localStorage.setItem(STORAGE_KEYS.AUTOMATION_RULES, JSON.stringify([]));
     localStorage.setItem(STORAGE_KEYS.SALES_BOTS, JSON.stringify([]));
+    rebaseAfterLocalReset();
   },
 
   getWaQrInstances: (): any[] => {
@@ -329,4 +363,3 @@ export const db = {
     localStorage.setItem('conversa_crm_wa_qr_instances_v1', JSON.stringify(items));
   }
 };
-

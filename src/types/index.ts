@@ -74,6 +74,31 @@ export interface LeadProduct {
   desconto: number; // em %
 }
 
+export interface LeadTracking {
+  dataEntrada?: string;
+  fonte?: string;
+  plataforma?: string;
+  posicionamento?: string;
+  campanha?: string | { nome?: string; id?: string };
+  conjunto?: string | { nome?: string; id?: string };
+  anuncio?: string | { nome?: string; id?: string };
+  anuncioId?: string;
+}
+
+export interface LeadQualification {
+  faturamento?: string;
+  segmento?: string;
+  regiao?: string;
+  numFuncionarios?: string;
+  cargo?: string;
+  dorPrincipal?: string;
+  leadScore?: number;
+  jaTrabalhouCacau?: string;
+  score?: number;
+  uf?: string;
+  ddd?: string;
+}
+
 export interface Lead {
   id: string;
   nome: string;
@@ -101,6 +126,10 @@ export interface Lead {
   };
   ultimaInteracaoAt: string;
   naoLidas: number;
+  planilhaId?: string;
+  valorFechado?: number;
+  rastreamento?: LeadTracking;
+  qualificacao?: LeadQualification;
 }
 
 export interface Contact {

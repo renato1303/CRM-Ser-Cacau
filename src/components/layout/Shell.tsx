@@ -5,6 +5,8 @@ import { GlobalSearch } from './GlobalSearch';
 import { AICopilotDrawer } from './AICopilotDrawer';
 import { ToastContainer } from './ToastContainer';
 import { useStore } from '../../store/useStore';
+import { LOGIN_REQUIRED_EVENT, recoveryRequested } from '../../services/apiAuth';
+import { supabase } from '../../services/db/supabase';
 import { LoginModal } from '../../modules/login/LoginModal';
 import { LoginPage } from '../../modules/login/LoginPage';
 
@@ -21,13 +23,14 @@ import { ConfiguracoesPage } from '../../modules/configuracoes/ConfiguracoesPage
 import { PluginsPage } from '../../modules/plugins/PluginsPage';
 
 export const Shell: React.FC = () => {
-  const { activeModule, theme, setActiveModule, isAuthenticated } = useStore();
+  const { activeModule, theme, setActiveModule, isAuthenticated, refreshData, completeLogin } = useStore();
+  const [checkingSession, setCheckingSession] = useState(true);
   const [loginModalOpen, setLoginModalOpen] = useState(false);
 
   useEffect(() => {
     const handleHashChange = () => {
       const hash = window.location.hash.replace('#/', '');
-      if (hash) {
+      if (hash && !hash.includes('=')) {
         setActiveModule(hash);
       }
     };
@@ -38,7 +41,49 @@ export const Shell: React.FC = () => {
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, [setActiveModule]);
 
+  // Login: recupera a sessão salva neste navegador e reage quando ela expira
+  useEffect(() => {
+    let active = true;
+    if (!supabase) { setCheckingSession(false); return; }
+    if (recoveryRequested) {
+      setCheckingSession(false);
+    } else {
+      supabase.auth.getSession().then(({ data }) => {
+        if (!active) return;
+        const email = data.session?.user?.email;
+        if (email && !useStore.getState().isAuthenticated) completeLogin(email);
+        setCheckingSession(false);
+      });
+    }
+    const { data: sub } = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'SIGNED_OUT') useStore.setState({ isAuthenticated: false });
+    });
+    const onLoginRequired = () => {
+      supabase?.auth.signOut();
+      useStore.setState({ isAuthenticated: false });
+    };
+    window.addEventListener(LOGIN_REQUIRED_EVENT, onLoginRequired);
+    return () => {
+      active = false;
+      sub.subscription.unsubscribe();
+      window.removeEventListener(LOGIN_REQUIRED_EVENT, onLoginRequired);
+    };
+  }, [completeLogin]);
+
+  // Mantém o CRM atualizado com o servidor (leads da planilha, mudanças da equipe, WhatsApp)
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    refreshData();
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible') refreshData();
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [isAuthenticated, refreshData]);
+
   if (!isAuthenticated) {
+    if (checkingSession) {
+      return <div className="flex h-screen w-screen items-center justify-center bg-slate-950 text-xs text-slate-400">Carregando…</div>;
+    }
     return <LoginPage />;
   }
 

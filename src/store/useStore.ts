@@ -4,7 +4,8 @@ import {
   Lead, Contact, Company, Product, Task, Note, Conversation, Message, Channel, ActivityEvent, Notification, MessageTemplate, EmailMessage, EmailTemplate, AutomationRule, SalesBot, BotNode, TaskTypeConfig, TaskOutcomeConfig 
 } from '../types';
 import { db } from '../services/db/storage';
-import { supabaseService } from '../services/db/supabase';
+import { pullCrmChanges } from '../services/db/sync';
+import { supabaseService, supabase } from '../services/db/supabase';
 
 interface CRMState {
   currentUser: User;
@@ -42,7 +43,8 @@ interface CRMState {
   // Actions
   setCurrentUser: (user: User) => void;
   updateCurrentUser: (updates: Partial<User>) => void;
-  login: (email: string, senha: string) => boolean;
+  login: (email: string, senha: string) => Promise<{ ok: boolean; error?: string }>;
+  completeLogin: (email: string) => void;
   logout: () => void;
   setTheme: (theme: 'light' | 'dark') => void;
   setWallpaper: (wallpaper: string) => void;
@@ -120,6 +122,22 @@ interface CRMState {
 const WA_FEED_SINCE_KEY = 'conversa_crm_wa_feed_since_v1';
 const WA_EPOCH = '1970-01-01T00:00:00.000Z';
 
+const WA_DELETED_LEADS_KEY = 'conversa_crm_wa_deleted_leads_v1';
+
+// Leads do WhatsApp excluídos: só voltam a ser criados se o contato mandar mensagem nova depois da exclusão
+function getDeletedWaLeads(): Record<string, string> {
+  try { return JSON.parse(localStorage.getItem(WA_DELETED_LEADS_KEY) || '{}'); } catch { return {}; }
+}
+
+function markWaLeadsDeleted(ids: string[]) {
+  const waIds = ids.filter(id => id.startsWith('wa-l-'));
+  if (waIds.length === 0) return;
+  const map = getDeletedWaLeads();
+  const now = new Date().toISOString();
+  for (const id of waIds) map[id] = now;
+  localStorage.setItem(WA_DELETED_LEADS_KEY, JSON.stringify(map));
+}
+
 const looksLikePhone = (name?: string) => !name || /^[+\d\s()-]+$/.test(name);
 
 function mergeWhatsAppFeed(feed: any) {
@@ -138,12 +156,39 @@ function mergeWhatsAppFeed(feed: any) {
   const firstPipeline = pipelines[0];
   const entryStage = firstPipeline?.stages.find(st => st.tipo === 'entrada') || firstPipeline?.stages[0];
 
+  const deletedWaLeads = getDeletedWaLeads();
+  let deletedWaLeadsChanged = false;
+  const newestIncomingByConv = new Map<string, string>();
+  for (const sm of serverMsgs) {
+    if (sm.direcao !== 'entrada' || !sm.enviadaAt) continue;
+    const iso = new Date(sm.enviadaAt).toISOString();
+    if (iso > (newestIncomingByConv.get(sm.conversationId) || '')) newestIncomingByConv.set(sm.conversationId, iso);
+  }
+
   const contactById = new Map(contacts.map((c, i) => [c.id, i]));
+  // Mesmo telefone = mesmo contato (ex.: lead da planilha que depois chamou no WhatsApp)
+  const phoneKeyOf = (raw?: string) => {
+    let d = (raw || '').replace(/\D/g, '');
+    if (d.length === 10 || d.length === 11) d = '55' + d;
+    if (d.startsWith('55') && (d.length === 12 || d.length === 13)) return `55${d.slice(2, 4)}${d.slice(-8)}`;
+    return d;
+  };
+  const contactByPhone = new Map<string, string>();
+  contacts.forEach(c => (c.telefones || []).forEach(t => {
+    const k = phoneKeyOf(t);
+    if (k && !contactByPhone.has(k)) contactByPhone.set(k, c.id);
+  }));
+  const leadByContact = new Map<string, string>();
+  leads.forEach(l => (l.contactIds || []).forEach(cid => { if (!leadByContact.has(cid)) leadByContact.set(cid, l.id); }));
   const leadById = new Map(leads.map((l, i) => [l.id, i]));
   const convById = new Map(conversations.map((c, i) => [c.id, i]));
 
   for (const sc of serverConvs) {
     const phone = sc.waPhone ? `+${sc.waPhone}` : '';
+    const matchedContactId = !contactById.has(sc.contactId) && sc.waPhone ? contactByPhone.get(phoneKeyOf(sc.waPhone)) : undefined;
+    if (matchedContactId) sc.contactId = matchedContactId;
+    const existingLeadForContact = leadByContact.get(sc.contactId);
+    if (existingLeadForContact && !leadById.has(sc.leadId)) sc.leadId = existingLeadForContact;
     const name = sc.contactName || phone || 'Contato WhatsApp';
 
     // Contato
@@ -161,6 +206,7 @@ function mergeWhatsAppFeed(feed: any) {
         updatedAt: now
       });
       contactById.set(sc.contactId, contacts.length - 1);
+      if (sc.waPhone) contactByPhone.set(phoneKeyOf(sc.waPhone), sc.contactId);
     } else {
       const i = contactById.get(sc.contactId)!;
       if (looksLikePhone(contacts[i].nome) && !looksLikePhone(sc.contactName)) {
@@ -170,7 +216,13 @@ function mergeWhatsAppFeed(feed: any) {
 
     // Lead: só para conversas com mensagem nova recebida (não para o histórico importado)
     let leadId: string | undefined = leadById.has(sc.leadId) ? sc.leadId : undefined;
-    if (!leadId && sc.criarLead && firstPipeline && entryStage) {
+    const deletedAt = deletedWaLeads[sc.leadId];
+    const canCreateLead = !deletedAt || (newestIncomingByConv.get(sc.id) || '') > deletedAt;
+    if (!leadId && sc.criarLead && canCreateLead && firstPipeline && entryStage) {
+      if (deletedAt) {
+        delete deletedWaLeads[sc.leadId];
+        deletedWaLeadsChanged = true;
+      }
       leads.push({
         id: sc.leadId,
         nome: name,
@@ -189,6 +241,7 @@ function mergeWhatsAppFeed(feed: any) {
         naoLidas: sc.naoLidas || 0
       });
       leadById.set(sc.leadId, leads.length - 1);
+      leadByContact.set(sc.contactId, sc.leadId);
       leadId = sc.leadId;
     } else if (leadId) {
       const i = leadById.get(leadId)!;
@@ -244,6 +297,7 @@ function mergeWhatsAppFeed(feed: any) {
   db.saveLeads(leads);
   db.saveConversations(conversations);
   db.saveMessages(messages);
+  if (deletedWaLeadsChanged) localStorage.setItem(WA_DELETED_LEADS_KEY, JSON.stringify(deletedWaLeads));
 }
 
 export const useStore = create<CRMState>((set, get) => ({
@@ -280,30 +334,35 @@ export const useStore = create<CRMState>((set, get) => ({
   toasts: [],
   isAuthenticated: false,
 
-  login: (email: string, senha: string) => {
+  // Login real pelo Supabase Auth (a senha nunca fica no código nem no navegador)
+  login: async (email: string, senha: string) => {
+    if (!supabase) {
+      return { ok: false, error: 'Login indisponível: faltam VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY nas variáveis da Vercel.' };
+    }
+    const { data, error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: senha });
+    if (error || !data.session) {
+      const msg = error?.message || '';
+      if (/invalid login|invalid credentials/i.test(msg)) return { ok: false, error: 'E-mail ou senha inválidos.' };
+      if (/email not confirmed/i.test(msg)) return { ok: false, error: 'Confirme o e-mail antes de entrar (ou marque "Auto Confirm" ao criar o usuário no Supabase).' };
+      return { ok: false, error: msg || 'Não foi possível entrar.' };
+    }
+    get().completeLogin(data.session.user.email || email);
+    return { ok: true };
+  },
+
+  // Liga o login ao usuário do CRM com o mesmo e-mail (ou ao primeiro administrador)
+  completeLogin: (email: string) => {
     const users = get().users;
-    const found = users.find(u => u.email.toLowerCase() === email.toLowerCase());
-    if (!found) return false;
-
-    if (found.email.toLowerCase() === 'renatoinacio2@gmail.com') {
-      if (senha === 'Remah13032019') {
-        db.setCurrentUser(found);
-        set({ currentUser: found, isAuthenticated: true });
-        return true;
-      }
-      return false;
-    }
-
-    const validPassword = found.senha ? found.senha === senha : senha === '123456';
-    if (validPassword) {
-      db.setCurrentUser(found);
-      set({ currentUser: found, isAuthenticated: true });
-      return true;
-    }
-    return false;
+    const found = users.find(u => u.email.toLowerCase() === email.toLowerCase())
+      || users.find(u => u.roleId === 'role-admin')
+      || users[0];
+    const current = found ? { ...found, email } : { ...get().currentUser, email };
+    db.setCurrentUser(current);
+    set({ currentUser: current, isAuthenticated: true });
   },
 
   logout: () => {
+    supabase?.auth.signOut();
     set({ isAuthenticated: false });
   },
 
@@ -340,6 +399,7 @@ export const useStore = create<CRMState>((set, get) => ({
   },
 
   refreshData: async () => {
+    await pullCrmChanges();
     try {
       const hasWaConversations = db.getConversations().some(c => c.id.startsWith('wa:'));
       let since = hasWaConversations ? (localStorage.getItem(WA_FEED_SINCE_KEY) || WA_EPOCH) : WA_EPOCH;
@@ -412,7 +472,10 @@ export const useStore = create<CRMState>((set, get) => ({
     const leads = get().leads.filter(l => l.id !== id);
     db.saveLeads(leads);
     supabaseService.deleteRecord('leads', id);
-    set({ leads });
+    const conversations = get().conversations.map(c => c.leadId === id ? { ...c, leadId: undefined } : c);
+    db.saveConversations(conversations);
+    markWaLeadsDeleted([id]);
+    set({ leads, conversations });
   },
 
   moveLeadStage: (leadId, newStageId) => {
@@ -443,7 +506,11 @@ export const useStore = create<CRMState>((set, get) => ({
   bulkDeleteLeads: (leadIds) => {
     const leads = get().leads.filter(l => !leadIds.includes(l.id));
     db.saveLeads(leads);
-    set({ leads });
+    leadIds.forEach(id => supabaseService.deleteRecord('leads', id));
+    const conversations = get().conversations.map(c => c.leadId && leadIds.includes(c.leadId) ? { ...c, leadId: undefined } : c);
+    db.saveConversations(conversations);
+    markWaLeadsDeleted(leadIds);
+    set({ leads, conversations });
   },
 
   addContact: (contactData) => {

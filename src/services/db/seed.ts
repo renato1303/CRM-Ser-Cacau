@@ -64,7 +64,6 @@ export const initialUsers: User[] = [
     teamId: 'team-1',
     ativo: true,
     metaMensal: 150000,
-    senha: 'Remah13032019',
   },
   {
     id: 'user-1',
@@ -76,7 +75,6 @@ export const initialUsers: User[] = [
     teamId: 'team-1',
     ativo: true,
     metaMensal: 85000,
-    senha: '123456',
   },
   {
     id: 'user-2',

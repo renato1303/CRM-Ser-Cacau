@@ -235,8 +235,23 @@ export const LeadsPage: React.FC = () => {
                               <span>{new Date(lead.ultimaInteracaoAt).toLocaleDateString('pt-BR')}</span>
                             </div>
 
-                            {/* Stage quick advance */}
-                            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                            {/* Excluir e abrir */}
+                            <div className="flex items-center gap-2 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+                              <button
+                                type="button"
+                                title="Excluir lead"
+                                aria-label={`Excluir o lead ${lead.nome}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (window.confirm(`Excluir o lead "${lead.nome}"?\n\nO lead sai do funil. O contato e as conversas continuam salvos.`)) {
+                                    deleteLead(lead.id);
+                                    addToast('Lead excluído', `"${lead.nome}" foi removido do funil.`, 'success');
+                                  }
+                                }}
+                                className="p-1 rounded-md text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
                               <span className="text-[10px] text-indigo-600 font-medium">Abrir</span>
                               <ArrowRight className="w-3.5 h-3.5 text-indigo-600" />
                             </div>
