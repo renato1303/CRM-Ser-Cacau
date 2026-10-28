@@ -901,25 +901,41 @@ function splitNameId(v) {
   const [nome, id] = v.split("|").map((x) => x.trim());
   return { nome: nome || null, id: id && /^\d+$/.test(id) ? id : null };
 }
-function parseSheetDate(v) {
+const DEFAULT_DATE_ORDER = (process.env.SHEET_DATE_ORDER || "").toUpperCase() === "DMY" ? "DMY" : "MDY";
+function safeIso(d) {
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+const pad2 = (v) => String(v).padStart(2, "0");
+function sheetDateCell(row) {
+  const firstKey = Object.keys(row)[0];
+  return pickCell(row, "ƒ", "Data", "Data de entrada", "Timestamp", "Carimbo de data/hora") ?? (firstKey ? cleanCell(row[firstKey]) : null);
+}
+function detectDateOrder(values) {
+  for (const v of values) {
+    const m = String(v || "").match(/^(\d{1,2})\/(\d{1,2})\/\d{4}/);
+    if (!m) continue;
+    if (Number(m[1]) > 12) return "DMY";
+    if (Number(m[2]) > 12) return "MDY";
+  }
+  return DEFAULT_DATE_ORDER;
+}
+function parseSheetDate(v, order = DEFAULT_DATE_ORDER) {
   if (!v) return null;
   const s = String(v).trim();
   if (/^\d+(\.\d+)?$/.test(s)) {
     const n = Number(s);
-    if (n > 2e4 && n < 8e4) return new Date(Math.round((n - 25569) * 864e5) + 3 * 36e5).toISOString();
+    if (n > 2e4 && n < 8e4) return safeIso(new Date(Math.round((n - 25569) * 864e5) + 3 * 36e5));
   }
-  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s)) {
-    const d2 = new Date(s);
-    return Number.isNaN(d2.getTime()) ? null : d2.toISOString();
-  }
+  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s)) return safeIso(new Date(s));
   let m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
-  if (m) return (/* @__PURE__ */ new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6] || "00"}-03:00`)).toISOString();
-  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (m) return safeIso(/* @__PURE__ */ new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6] || "00"}-03:00`));
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ ,T]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
   if (m) {
-    return (/* @__PURE__ */ new Date(`${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}T${(m[4] || "00").padStart(2, "0")}:${m[5] || "00"}:${m[6] || "00"}-03:00`)).toISOString();
+    const [day, month] = order === "DMY" ? [Number(m[1]), Number(m[2])] : [Number(m[2]), Number(m[1])];
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+    return safeIso(/* @__PURE__ */ new Date(`${m[3]}-${pad2(month)}-${pad2(day)}T${pad2(m[4] || "0")}:${m[5] || "00"}:${m[6] || "00"}-03:00`));
   }
-  const d = new Date(s);
-  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  return safeIso(new Date(s));
 }
 function normFaturamento(v) {
   if (!v) return null;
@@ -950,7 +966,7 @@ function normPosicionamento(v) {
   if (v === "an") return "Audience Network";
   return v.replace(/_/g, " ");
 }
-function normalizeSheetRow(row) {
+function normalizeSheetRow(row, dateOrder = DEFAULT_DATE_ORDER) {
   const planilhaId = pickCell(row, "ID");
   const nome = pickCell(row, "Nome");
   const empresa = pickCell(row, "Nome da empresa", "Empresa");
@@ -977,8 +993,7 @@ function normalizeSheetRow(row) {
   if (score !== null && Number.isNaN(score)) score = null;
   if (score !== null && score <= 1) score = Math.round(score * 100);
   const cacau = pickCell(row, "Já trabalhou com cacau?", "Ja trabalhou com cacau?");
-  const firstKey = Object.keys(row)[0];
-  const dataEntrada = parseSheetDate(pickCell(row, "ƒ", "Data", "Data de entrada", "Timestamp", "Carimbo de data/hora") ?? cleanCell(row[firstKey]));
+  const dataEntrada = parseSheetDate(sheetDateCell(row), dateOrder);
   return {
     planilhaId,
     nome: nome || empresa || phone?.display || email || "Lead da planilha",
@@ -1039,7 +1054,17 @@ app.post("/api/leads/ingest", async (req, res) => {
     const sb = db();
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const result = { criados: 0, atualizados: 0, ignorados: 0, erros: [] };
-    const normalized = rawRows.map((r) => r && typeof r === "object" ? normalizeSheetRow(r) : null);
+    const validRows = rawRows.filter((r) => r && typeof r === "object");
+    const dateOrder = detectDateOrder(validRows.map((r) => sheetDateCell(r)));
+    const normalized = rawRows.map((r, index) => {
+      if (!r || typeof r !== "object") return null;
+      try {
+        return normalizeSheetRow(r, dateOrder);
+      } catch (err) {
+        result.erros.push(`linha ${index + 1} (${cleanCell(r.ID) || "sem ID"}): ${errorMessage(err)}`);
+        return null;
+      }
+    });
     const pipeRows = check(await sb.from("crm_records").select("id, data").eq("entity", "pipelines").eq("deleted", false), "ler funis") || [];
     const pipeline = (pipeRows.find((p) => p.id === "pipe-vendas") || pipeRows[0])?.data || null;
     const entryStageId = pipeline?.stages?.find((st) => st.tipo === "entrada")?.id || "st-entrada";
