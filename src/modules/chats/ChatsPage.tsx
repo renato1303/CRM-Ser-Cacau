@@ -1,19 +1,18 @@
 import React, { useState, useEffect } from 'react';
 import { 
-  MessageSquare, Search, Send, Paperclip, Phone, Bot, Check, CheckCheck, 
-  User, Pin, Lock, Unlock, Users, Sparkles, Filter, RefreshCw, Radio 
+  MessageSquare, Search, Send, Paperclip, Phone, Check, CheckCheck, 
+  User, Pin, Lock, Unlock, Users, Sparkles, Filter, RefreshCw 
 } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { formatDate } from '../../utils/cn';
 import { Button } from '../../components/ui/Button';
 import { Avatar } from '../../components/ui/Avatar';
 import { MessageComposer } from '../../components/chat/MessageComposer';
-import { WhatsAppPluginModal } from './WhatsAppPluginModal';
 
 export const ChatsPage: React.FC = () => {
   const { 
     conversations, contacts, messages, users, sendMessage, 
-    simulateClientIncomingMessage, updateConversationStatus, assignConversation, markConversationUnread, refreshData 
+    updateConversationStatus, assignConversation, markConversationUnread, refreshData 
   } = useStore();
 
   useEffect(() => {
@@ -28,31 +27,6 @@ export const ChatsPage: React.FC = () => {
   const [selectedConvId, setSelectedConvId] = useState<string>(conversations[0]?.id || '');
   const [filterType, setFilterType] = useState<'todas' | 'nao_lidas' | 'minhas'>('todas');
   const [searchQuery, setSearchQuery] = useState('');
-
-  // Client Simulator state
-  const [simulatorOpen, setSimulatorOpen] = useState(false);
-  const [whatsappModalOpen, setWhatsappModalOpen] = useState(false);
-  const [simNome, setSimNome] = useState('Novo Cliente Web');
-  const [simTelefone, setSimTelefone] = useState('+55 (11) 97777-8888');
-  const [simCanal, setSimCanal] = useState<'whatsapp' | 'instagram' | 'messenger' | 'telegram' | 'email' | 'chat_site'>('whatsapp');
-  const [simMensagem, setSimMensagem] = useState('Olá! Gostaria de conhecer os planos do CRM.');
-  const [autoSimulate, setAutoSimulate] = useState(false);
-
-  // Auto simulator interval
-  useEffect(() => {
-    let interval: any;
-    if (autoSimulate) {
-      interval = setInterval(() => {
-        simulateClientIncomingMessage(
-          `Cliente Auto ${Math.floor(Math.random() * 100)}`, 
-          `+55 (11) 9${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}`, 
-          'whatsapp', 
-          'Mensagem gerada automaticamente pelo simulador.'
-        );
-      }, 10000);
-    }
-    return () => clearInterval(interval);
-  }, [autoSimulate]);
 
   const activeConv = conversations.find(c => c.id === selectedConvId) || conversations[0];
   const activeContact = contacts.find(c => c.id === activeConv?.contactId);
@@ -217,72 +191,7 @@ export const ChatsPage: React.FC = () => {
                   <p className="text-xs text-slate-500">{activeContact.telefones[0]} · WhatsApp</p>
                 </div>
               </div>
-
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setWhatsappModalOpen(true)}
-                  className="gap-2 text-emerald-600 border-emerald-200 dark:border-emerald-800 hover:bg-emerald-50 dark:hover:bg-emerald-950/40"
-                >
-                  <Radio className="w-4 h-4 text-emerald-500" /> Plugin WhatsApp
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setSimulatorOpen(!simulatorOpen)}
-                  className="gap-2 text-indigo-600 border-indigo-200 dark:border-indigo-800"
-                >
-                  <Bot className="w-4 h-4" /> Simulador de Cliente
-                </Button>
-              </div>
             </div>
-
-            {/* Developer Client Simulator Panel */}
-            {simulatorOpen && (
-              <div className="bg-indigo-50 dark:bg-indigo-950/50 p-4 border-b border-indigo-200 dark:border-indigo-900 text-xs space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-indigo-900 dark:text-indigo-200">Simulador de Mensagens do Cliente (Desenvolvedor)</span>
-                  <button 
-                    onClick={() => setAutoSimulate(!autoSimulate)}
-                    className={`px-2.5 py-1 rounded-md font-semibold text-[11px] ${autoSimulate ? 'bg-red-600 text-white' : 'bg-green-600 text-white'}`}
-                  >
-                    {autoSimulate ? 'Parar Auto-Simulação' : 'Iniciar Auto-Simulação (10s)'}
-                  </button>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                  <input
-                    type="text"
-                    placeholder="Nome do Cliente"
-                    value={simNome}
-                    onChange={(e) => setSimNome(e.target.value)}
-                    className="px-3 py-1.5 bg-white dark:bg-slate-900 border border-indigo-200 dark:border-indigo-800 rounded-lg outline-none"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Telefone"
-                    value={simTelefone}
-                    onChange={(e) => setSimTelefone(e.target.value)}
-                    className="px-3 py-1.5 bg-white dark:bg-slate-900 border border-indigo-200 dark:border-indigo-800 rounded-lg outline-none"
-                  />
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      simulateClientIncomingMessage(simNome, simTelefone, simCanal, simMensagem);
-                    }}
-                  >
-                    Enviar Mensagem como Cliente
-                  </Button>
-                </div>
-                <input
-                  type="text"
-                  placeholder="Mensagem do cliente..."
-                  value={simMensagem}
-                  onChange={(e) => setSimMensagem(e.target.value)}
-                  className="w-full px-3 py-1.5 bg-white dark:bg-slate-900 border border-indigo-200 dark:border-indigo-800 rounded-lg outline-none"
-                />
-              </div>
-            )}
 
             {/* Messages Feed */}
             <div className="flex-1 p-6 overflow-y-auto space-y-4">
@@ -363,8 +272,6 @@ export const ChatsPage: React.FC = () => {
           <p className="text-xs text-slate-400 text-center py-8">Nenhum contato selecionado.</p>
         )}
       </div>
-
-      <WhatsAppPluginModal isOpen={whatsappModalOpen} onClose={() => setWhatsappModalOpen(false)} />
     </div>
   );
 };
