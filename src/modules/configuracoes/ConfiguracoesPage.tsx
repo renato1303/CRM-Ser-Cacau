@@ -5,14 +5,15 @@ import { Button } from '../../components/ui/Button';
 import { Tabs } from '../../components/ui/Tabs';
 import { Modal } from '../../components/ui/Modal';
 import { db } from '../../services/db/storage';
+import { TagsSettings } from './TagsSettings';
 
 export const ConfiguracoesPage: React.FC = () => {
   const { 
     messageTemplates, addMessageTemplate, deleteMessageTemplate, 
     emailTemplates, addEmailTemplate, deleteEmailTemplate, 
-    restoreSeed, clearAllData, clearAllDataCompletely 
+    restoreSeed, clearAllData, clearAllDataCompletely, tags 
   } = useStore();
-  const [tab, setTab] = useState<'templates' | 'email_templates'>('templates');
+  const [tab, setTab] = useState<'etiquetas' | 'templates' | 'email_templates'>('etiquetas');
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   
   // New template modal
@@ -70,6 +71,7 @@ export const ConfiguracoesPage: React.FC = () => {
 
       <Tabs
         tabs={[
+          { id: 'etiquetas', label: 'Etiquetas', badge: tags.length },
           { id: 'templates', label: 'Modelos de Mensagem', badge: messageTemplates.length },
           { id: 'email_templates', label: 'Modelos de E-mail', badge: emailTemplates.length },
         ]}
@@ -77,6 +79,8 @@ export const ConfiguracoesPage: React.FC = () => {
         onChange={(id) => setTab(id as any)}
         className="mb-6"
       />
+
+      {tab === 'etiquetas' && <TagsSettings />}
 
       {tab === 'templates' && (
         <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm p-6 flex flex-col flex-1">

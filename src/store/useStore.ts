@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { 
   User, Pipeline, Tag, LeadSource, LossReason, 
-  Lead, Contact, Company, Product, Task, Note, Conversation, Message, Channel, ActivityEvent, Notification, MessageTemplate, EmailMessage, EmailTemplate, AutomationRule, SalesBot, BotNode, TaskTypeConfig, TaskOutcomeConfig 
+  Lead, Contact, Company, Product, Task, Note, Conversation, Message, Channel, ActivityEvent, Notification, MessageTemplate, EmailMessage, EmailTemplate, AutomationRule, SalesBot, BotNode, TaskTypeConfig, TaskOutcomeConfig, SavedLeadFilter, LeadFilterState 
 } from '../types';
 import { db } from '../services/db/storage';
 import { pullCrmChanges } from '../services/db/sync';
@@ -62,6 +62,20 @@ interface CRMState {
   bulkUpdateLeadsStage: (leadIds: string[], stageId: string) => void;
   bulkUpdateLeadsResponsavel: (leadIds: string[], responsavelId: string) => void;
   bulkDeleteLeads: (leadIds: string[]) => void;
+  winLead: (leadId: string, stageId: string, valorFechado: number) => void;
+
+  // Etiquetas
+  addTag: (nome: string, cor: string) => Tag;
+  updateTag: (id: string, updates: Partial<Tag>) => void;
+  deleteTag: (id: string) => void;
+  setLeadTags: (leadId: string, tagIds: string[]) => void;
+  bulkAddTag: (leadIds: string[], tagId: string) => void;
+  bulkRemoveTag: (leadIds: string[], tagId: string) => void;
+
+  // Filtros salvos do funil
+  savedFilters: SavedLeadFilter[];
+  saveLeadFilter: (nome: string, filtro: LeadFilterState) => SavedLeadFilter;
+  deleteLeadFilter: (id: string) => void;
 
   // Contact actions
   addContact: (contact: Omit<Contact, 'id' | 'createdAt' | 'updatedAt'>) => Contact;
@@ -306,6 +320,7 @@ export const useStore = create<CRMState>((set, get) => ({
   users: db.getUsers(),
   pipelines: db.getPipelines(),
   tags: db.getTags(),
+  savedFilters: db.getSavedLeadFilters(),
   sources: db.getSources(),
   lossReasons: db.getLossReasons(),
   companies: db.getCompanies(),
@@ -423,6 +438,7 @@ export const useStore = create<CRMState>((set, get) => ({
       users: db.getUsers(),
       pipelines: db.getPipelines(),
       tags: db.getTags(),
+    savedFilters: db.getSavedLeadFilters(),
       companies: db.getCompanies(),
       products: db.getProducts(),
       contacts: db.getContacts(),
@@ -512,6 +528,86 @@ export const useStore = create<CRMState>((set, get) => ({
     db.saveConversations(conversations);
     markWaLeadsDeleted(leadIds);
     set({ leads, conversations });
+  },
+
+  winLead: (leadId, stageId, valorFechado) => {
+    const now = new Date().toISOString();
+    const leads = get().leads.map(l => l.id === leadId
+      ? { ...l, stageId, valorFechado, closedAt: now, updatedAt: now }
+      : l);
+    db.saveLeads(leads);
+    set({ leads });
+  },
+
+  addTag: (nome, cor) => {
+    const tag: Tag = { id: `tag-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, nome: nome.trim(), cor };
+    const tags = [...get().tags, tag];
+    db.saveTags(tags);
+    set({ tags });
+    return tag;
+  },
+
+  updateTag: (id, updates) => {
+    const tags = get().tags.map(t => t.id === id ? { ...t, ...updates } : t);
+    db.saveTags(tags);
+    set({ tags });
+  },
+
+  // Exclui a etiqueta e tira ela de todos os leads
+  deleteTag: (id) => {
+    const tag = get().tags.find(t => t.id === id);
+    const tags = get().tags.filter(t => t.id !== id);
+    const sameTag = (value: string) => value === id || (!!tag && value.toLowerCase() === tag.nome.toLowerCase());
+    const now = new Date().toISOString();
+    const leads = get().leads.map(l => l.tags.some(sameTag)
+      ? { ...l, tags: l.tags.filter(v => !sameTag(v)), updatedAt: now }
+      : l);
+    db.saveTags(tags);
+    db.saveLeads(leads);
+    set({ tags, leads });
+  },
+
+  setLeadTags: (leadId, tagIds) => {
+    const now = new Date().toISOString();
+    const leads = get().leads.map(l => l.id === leadId ? { ...l, tags: [...new Set(tagIds)], updatedAt: now } : l);
+    db.saveLeads(leads);
+    set({ leads });
+  },
+
+  bulkAddTag: (leadIds, tagId) => {
+    const ids = new Set(leadIds);
+    const now = new Date().toISOString();
+    const leads = get().leads.map(l => ids.has(l.id) && !l.tags.includes(tagId)
+      ? { ...l, tags: [...l.tags, tagId], updatedAt: now }
+      : l);
+    db.saveLeads(leads);
+    set({ leads });
+  },
+
+  bulkRemoveTag: (leadIds, tagId) => {
+    const ids = new Set(leadIds);
+    const tag = get().tags.find(t => t.id === tagId);
+    const sameTag = (value: string) => value === tagId || (!!tag && value.toLowerCase() === tag.nome.toLowerCase());
+    const now = new Date().toISOString();
+    const leads = get().leads.map(l => ids.has(l.id) && l.tags.some(sameTag)
+      ? { ...l, tags: l.tags.filter(v => !sameTag(v)), updatedAt: now }
+      : l);
+    db.saveLeads(leads);
+    set({ leads });
+  },
+
+  saveLeadFilter: (nome, filtro) => {
+    const item: SavedLeadFilter = { id: `flt-${Date.now()}`, nome: nome.trim(), filtro, createdAt: new Date().toISOString() };
+    const savedFilters = [...get().savedFilters, item];
+    db.saveSavedLeadFilters(savedFilters);
+    set({ savedFilters });
+    return item;
+  },
+
+  deleteLeadFilter: (id) => {
+    const savedFilters = get().savedFilters.filter(f => f.id !== id);
+    db.saveSavedLeadFilters(savedFilters);
+    set({ savedFilters });
   },
 
   addContact: (contactData) => {

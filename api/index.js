@@ -801,7 +801,8 @@ const CRM_ENTITIES = /* @__PURE__ */ new Set([
   "messageTemplates",
   "emailTemplates",
   "automationRules",
-  "salesBots"
+  "salesBots",
+  "savedFilters"
 ]);
 const INGEST_SECRET = (process.env.CRM_INGEST_SECRET || EVOLUTION_WEBHOOK_SECRET || "").trim();
 function onlyDigits(v) {

@@ -4,6 +4,9 @@ import {
   MessageSquare, FileText, CheckCircle2, Sparkles, Send, Paperclip, Plus, User, Tag as TagIcon 
 } from 'lucide-react';
 import { useStore } from '../../store/useStore';
+import { TagPicker } from './TagPicker';
+import { WonValueModal } from './WonValueModal';
+import { leadProductsTotal } from './leadFilters';
 import { formatCurrency, formatDate } from '../../utils/cn';
 import { Button } from '../../components/ui/Button';
 import { Tabs } from '../../components/ui/Tabs';
@@ -18,8 +21,12 @@ interface LeadDetailPageProps {
 export const LeadDetailPage: React.FC<LeadDetailPageProps> = ({ leadId }) => {
   const { 
     leads, contacts, companies, users, pipelines, notes, tasks, 
-    messages, conversations, setActiveModule, updateLead, addNote, addTask, sendMessage, addContact 
+    messages, conversations, setActiveModule, updateLead, addNote, addTask, sendMessage, addContact,
+    tags, addTag, setLeadTags, moveLeadStage, winLead, addToast
   } = useStore();
+  const [wonStageId, setWonStageId] = useState<string | null>(null);
+  const [editingValue, setEditingValue] = useState<'negociado' | 'fechado' | null>(null);
+  const [valueInput, setValueInput] = useState('');
 
   const lead = leads.find(l => l.id === leadId);
   const contact = contacts.find(c => lead?.contactIds.includes(c.id));
@@ -104,29 +111,114 @@ export const LeadDetailPage: React.FC<LeadDetailPageProps> = ({ leadId }) => {
           <span className="text-xs font-mono text-slate-400">ID: {lead.id}</span>
         </div>
 
-        {/* Lead Title & Stage Progress */}
-        <div className="mb-6">
-          <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100 mb-2">{lead.nome}</h2>
-          <div className="flex items-center gap-2 mb-4">
-            <span className="text-xl font-bold text-emerald-600 dark:text-emerald-400">{formatCurrency(lead.valor)}</span>
-          </div>
-
-          {/* Stage Progress Bar */}
-          <div className="space-y-1.5">
-            <div className="flex justify-between text-xs font-semibold text-slate-500">
-              <span>Etapa Atual</span>
-              <span>{stages.find(s => s.id === lead.stageId)?.nome}</span>
-            </div>
-            <div className="w-full h-2 bg-slate-100 dark:bg-slate-800 rounded-full flex gap-1 overflow-hidden">
-              {stages.map((st, i) => (
-                <div 
-                  key={st.id} 
-                  className={`flex-1 h-full rounded-sm ${st.id === lead.stageId ? 'bg-indigo-600' : 'bg-slate-200 dark:bg-slate-700'}`} 
+        {/* Lead Title, valores, etiquetas e etapa */}
+        {(() => {
+          const currentStage = stages.find(s => s.id === lead.stageId);
+          const isWon = currentStage?.tipo === 'ganho';
+          const productsTotal = leadProductsTotal(lead);
+          const parseValue = (v: string) => Number(v.replace(/\./g, '').replace(',', '.'));
+          const startEdit = (which: 'negociado' | 'fechado') => {
+            const current = which === 'negociado' ? lead.valor : (lead.valorFechado ?? lead.valor);
+            setValueInput(String(current ?? 0).replace('.', ','));
+            setEditingValue(which);
+          };
+          const saveEdit = () => {
+            const n = parseValue(valueInput);
+            if (!Number.isNaN(n) && n >= 0) {
+              updateLead(lead.id, editingValue === 'negociado' ? { valor: n } : { valorFechado: n });
+            }
+            setEditingValue(null);
+          };
+          // Função de renderização (não componente), para o campo não perder o foco ao digitar
+          const ValueBox = ({ which, label, value, color }: { which: 'negociado' | 'fechado'; label: string; value: number; color: string }) => (
+            <div key={which} className="flex-1 min-w-[130px] p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-800">
+              <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">{label}</p>
+              {editingValue === which ? (
+                <input
+                  autoFocus
+                  inputMode="decimal"
+                  value={valueInput}
+                  onChange={(e) => setValueInput(e.target.value)}
+                  onBlur={saveEdit}
+                  onKeyDown={(e) => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') setEditingValue(null); }}
+                  className="mt-1 w-full px-2 py-1 text-sm rounded-md border border-indigo-400 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 outline-none"
                 />
-              ))}
+              ) : (
+                <button type="button" onClick={() => startEdit(which)} title="Clique para editar" className={`mt-1 text-lg font-bold ${color} hover:underline`}>
+                  {formatCurrency(value)}
+                </button>
+              )}
             </div>
-          </div>
-        </div>
+          );
+          return (
+            <div className="mb-6 space-y-4">
+              <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100">{lead.nome}</h2>
+
+              <TagPicker
+                tags={tags}
+                value={lead.tags}
+                onChange={(ids) => setLeadTags(lead.id, ids)}
+                onCreate={(nome) => addTag(nome, '#6366F1')}
+              />
+
+              <div className="flex flex-wrap gap-2">
+                {ValueBox({ which: 'negociado', label: 'Valor negociado', value: lead.valor || 0, color: 'text-slate-900 dark:text-slate-100' })}
+                {isWon && (
+                  ValueBox({ which: 'fechado', label: 'Valor fechado', value: lead.valorFechado ?? lead.valor ?? 0, color: 'text-emerald-600 dark:text-emerald-400' })
+                )}
+              </div>
+              {productsTotal > 0 && Math.abs(productsTotal - (lead.valor || 0)) > 0.009 && (
+                <button
+                  type="button"
+                  onClick={() => updateLead(lead.id, { valor: Math.round(productsTotal * 100) / 100 })}
+                  className="text-[11px] text-indigo-600 hover:underline"
+                >
+                  Usar a soma dos produtos como valor negociado ({formatCurrency(productsTotal)})
+                </button>
+              )}
+
+              {/* Etapa: escolher "Venda ganha" pede o valor fechado */}
+              <div className="space-y-1.5">
+                <div className="flex justify-between items-center text-xs font-semibold text-slate-500">
+                  <span>Etapa atual</span>
+                  <select
+                    value={lead.stageId}
+                    onChange={(e) => {
+                      const target = stages.find(s => s.id === e.target.value);
+                      if (!target || target.id === lead.stageId) return;
+                      if (target.tipo === 'ganho') { setWonStageId(target.id); return; }
+                      moveLeadStage(lead.id, target.id);
+                      addToast('Etapa alterada', `${lead.nome} → ${target.nome}`);
+                    }}
+                    className="px-2 py-1 text-xs bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-slate-100 outline-none"
+                  >
+                    {stages.map(st => <option key={st.id} value={st.id}>{st.nome}</option>)}
+                  </select>
+                </div>
+                <div className="w-full h-2 bg-slate-100 dark:bg-slate-800 rounded-full flex gap-1 overflow-hidden">
+                  {stages.map(st => (
+                    <div
+                      key={st.id}
+                      className={`flex-1 h-full rounded-sm ${st.id === lead.stageId ? 'bg-indigo-600' : 'bg-slate-200 dark:bg-slate-700'}`}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              <WonValueModal
+                lead={wonStageId ? lead : null}
+                stageName={stages.find(s => s.id === wonStageId)?.nome || ''}
+                onCancel={() => setWonStageId(null)}
+                onConfirm={(valorFechado) => {
+                  if (!wonStageId) return;
+                  winLead(lead.id, wonStageId, valorFechado);
+                  addToast('Venda ganha', `${lead.nome}: ${formatCurrency(valorFechado)}`, 'success');
+                  setWonStageId(null);
+                }}
+              />
+            </div>
+          );
+        })()}
 
         {/* Tabs */}
         <Tabs
@@ -207,12 +299,10 @@ export const LeadDetailPage: React.FC<LeadDetailPageProps> = ({ leadId }) => {
             return h < 24 ? `${h} h ${min % 60} min` : `${Math.floor(h / 24)} d ${h % 24} h`;
           };
           const avg = waits.length ? waits.reduce((a, b) => a + b, 0) / waits.length : undefined;
-          const Row = ({ label, value }: { label: string; value?: any }) => (
+          const Row = ({ label, value }: { label: string; value?: React.ReactNode }) => (
             <div className="flex justify-between gap-3 py-1.5 border-b border-slate-100 dark:border-slate-800 last:border-0">
               <span className="text-slate-500 shrink-0">{label}</span>
-              <span className="font-medium text-slate-900 dark:text-slate-100 text-right break-words">
-                {typeof value === 'object' && value !== null ? (value.nome || value.id || JSON.stringify(value)) : (value || '—')}
-              </span>
+              <span className="font-medium text-slate-900 dark:text-slate-100 text-right break-words">{value || '—'}</span>
             </div>
           );
           return (

@@ -5,7 +5,7 @@
 export type SyncEntity =
   | 'users' | 'pipelines' | 'tags' | 'companies' | 'products' | 'contacts' | 'leads'
   | 'tasks' | 'notes' | 'activities' | 'messageTemplates' | 'emailTemplates'
-  | 'automationRules' | 'salesBots';
+  | 'automationRules' | 'salesBots' | 'savedFilters';
 
 const KEYS: Record<SyncEntity, string> = {
   users: 'conversa_crm_users_v1',
@@ -22,6 +22,7 @@ const KEYS: Record<SyncEntity, string> = {
   emailTemplates: 'conversa_crm_email_templates_v1',
   automationRules: 'conversa_crm_auto_rules_v1',
   salesBots: 'conversa_crm_sales_bots_v1',
+  savedFilters: 'conversa_crm_saved_lead_filters_v1',
 };
 const ENTITIES = Object.keys(KEYS) as SyncEntity[];
 

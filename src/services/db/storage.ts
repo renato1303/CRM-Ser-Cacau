@@ -1,6 +1,6 @@
 import { 
   User, Team, Role, Pipeline, Tag, LeadSource, LossReason, 
-  Lead, Contact, Company, Product, Task, Note, Conversation, Message, Channel, ActivityEvent, Notification, MessageTemplate, EmailMessage, EmailTemplate, AutomationRule, SalesBot, TaskTypeConfig, TaskOutcomeConfig 
+  Lead, Contact, Company, Product, Task, Note, Conversation, Message, Channel, ActivityEvent, Notification, MessageTemplate, EmailMessage, EmailTemplate, AutomationRule, SalesBot, TaskTypeConfig, TaskOutcomeConfig, SavedLeadFilter 
 } from '../../types';
 import { 
   initialUsers, initialTeams, initialRoles, initialPipelines, initialTags, 
@@ -79,6 +79,19 @@ export const db = {
   saveTags: (items: Tag[]) => {
     localStorage.setItem(STORAGE_KEYS.TAGS, JSON.stringify(items));
     queueSync('tags', items);
+  },
+
+  getSavedLeadFilters: (): SavedLeadFilter[] => {
+    try {
+      const raw = localStorage.getItem('conversa_crm_saved_lead_filters_v1');
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  },
+  saveSavedLeadFilters: (items: SavedLeadFilter[]) => {
+    localStorage.setItem('conversa_crm_saved_lead_filters_v1', JSON.stringify(items));
+    queueSync('savedFilters', items);
   },
 
   getSources: (): LeadSource[] => {

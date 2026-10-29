@@ -79,9 +79,9 @@ export interface LeadTracking {
   fonte?: string;
   plataforma?: string;
   posicionamento?: string;
-  campanha?: string | { nome?: string; id?: string };
-  conjunto?: string | { nome?: string; id?: string };
-  anuncio?: string | { nome?: string; id?: string };
+  campanha?: string;
+  conjunto?: string;
+  anuncio?: string;
   anuncioId?: string;
 }
 
@@ -371,6 +371,31 @@ export interface SalesBot {
   ativo: boolean;
   estatisticas: { executado: number; convertido: number };
 }
+
+// ==========================================
+// Filtros do funil (kanban/lista)
+// ==========================================
+export interface LeadFilterState {
+  etapas: string[];
+  responsaveis: string[];
+  etiquetas: string[];
+  segmentos: string[];
+  faturamentos: string[];
+  cacau: string[];
+  campanhas: string[];
+  anuncios: string[];
+  entradaDe: string;
+  entradaAte: string;
+  tarefas: '' | 'sem_tarefa' | 'atrasada';
+}
+
+export interface SavedLeadFilter {
+  id: string;
+  nome: string;
+  filtro: LeadFilterState;
+  createdAt: string;
+}
+
 
 
 
