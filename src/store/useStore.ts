@@ -119,7 +119,8 @@ interface CRMState {
 // ==========================================
 // WHATSAPP VIA QR: junta no navegador o que chegou no servidor
 // ==========================================
-const WA_FEED_SINCE_KEY = 'conversa_crm_wa_feed_since_v2';
+// v3: força baixar o WhatsApp de novo uma vez (corrige mensagens que ficaram de fora)
+const WA_FEED_SINCE_KEY = 'conversa_crm_wa_feed_since_v3';
 const WA_EPOCH = '1970-01-01T00:00:00.000Z';
 
 const WA_DELETED_LEADS_KEY = 'conversa_crm_wa_deleted_leads_v1';

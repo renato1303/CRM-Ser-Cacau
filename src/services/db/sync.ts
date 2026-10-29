@@ -25,7 +25,8 @@ const KEYS: Record<SyncEntity, string> = {
 };
 const ENTITIES = Object.keys(KEYS) as SyncEntity[];
 
-const SINCE_KEY = 'conversa_crm_sync_since_v2';
+// v3: força baixar tudo de novo uma vez (corrige registros que ficaram de fora)
+const SINCE_KEY = 'conversa_crm_sync_since_v3';
 const EPOCH = '1970-01-01T00:00:00.000Z';
 
 type Change = { entity: SyncEntity; id: string; data: any; deleted: boolean };
