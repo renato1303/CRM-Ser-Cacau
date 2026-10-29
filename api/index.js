@@ -669,10 +669,32 @@ app.get("/api/wa/feed", async (req, res) => {
     const since = typeof req.query.since === "string" && req.query.since ? req.query.since : "1970-01-01T00:00:00.000Z";
     const limit = 1e3;
     const sb = db();
-    const convs = check(await sb.from("wa_conversations").select("*").gt("updated_at", since).order("updated_at", { ascending: true }).limit(limit), "feed conversas") || [];
-    const msgs = check(await sb.from("wa_messages").select("*").gt("updated_at", since).order("updated_at", { ascending: true }).limit(limit), "feed mensagens") || [];
+    let convs = check(await sb.from("wa_conversations").select("*").gt("updated_at", since).order("updated_at", { ascending: true }).limit(limit), "feed conversas") || [];
+    let msgs = check(await sb.from("wa_messages").select("*").gt("updated_at", since).order("updated_at", { ascending: true }).limit(limit), "feed mensagens") || [];
     const convTruncated = convs.length === limit;
     const msgTruncated = msgs.length === limit;
+    if (convTruncated) {
+      const last = convs[convs.length - 1].updated_at;
+      const ties = check(await sb.from("wa_conversations").select("*").eq("updated_at", last), "feed conversas ties") || [];
+      const seen = new Set(convs.map((c) => c.id));
+      for (const t of ties) {
+        if (!seen.has(t.id)) {
+          convs.push(t);
+          seen.add(t.id);
+        }
+      }
+    }
+    if (msgTruncated) {
+      const last = msgs[msgs.length - 1].updated_at;
+      const ties = check(await sb.from("wa_messages").select("*").eq("updated_at", last), "feed mensagens ties") || [];
+      const seen = new Set(msgs.map((m) => m.id));
+      for (const t of ties) {
+        if (!seen.has(t.id)) {
+          msgs.push(t);
+          seen.add(t.id);
+        }
+      }
+    }
     const lastConv = convs.length ? convs[convs.length - 1].updated_at : since;
     const lastMsg = msgs.length ? msgs[msgs.length - 1].updated_at : since;
     const maxAll = [lastConv, lastMsg, since].sort().pop();
@@ -871,8 +893,19 @@ app.get("/api/crm/feed", async (req, res) => {
   try {
     const since = typeof req.query.since === "string" && req.query.since ? req.query.since : "1970-01-01T00:00:00.000Z";
     const limit = 2e3;
-    const rows = check(await db().from("crm_records").select("entity, id, data, deleted, updated_at").gt("updated_at", since).order("updated_at", { ascending: true }).limit(limit), "feed do CRM") || [];
+    let rows = check(await db().from("crm_records").select("entity, id, data, deleted, updated_at").gt("updated_at", since).order("updated_at", { ascending: true }).limit(limit), "feed do CRM") || [];
     const hasMore = rows.length === limit;
+    if (hasMore) {
+      const last = rows[rows.length - 1].updated_at;
+      const ties = check(await db().from("crm_records").select("entity, id, data, deleted, updated_at").eq("updated_at", last), "feed do CRM ties") || [];
+      const seen = new Set(rows.map((r) => r.id));
+      for (const t of ties) {
+        if (!seen.has(t.id)) {
+          rows.push(t);
+          seen.add(t.id);
+        }
+      }
+    }
     const nextSince = rows.length ? rows[rows.length - 1].updated_at : since;
     return res.json({ records: rows, nextSince, hasMore });
   } catch (err) {
