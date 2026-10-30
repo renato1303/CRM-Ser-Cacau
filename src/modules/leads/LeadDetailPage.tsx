@@ -252,11 +252,51 @@ export const LeadDetailPage: React.FC<LeadDetailPageProps> = ({ leadId }) => {
               <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Responsável & Origem</h4>
               <div className="flex items-center gap-3 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50">
                 {responsable && <Avatar src={responsable.avatar} name={responsable.nome} size="md" />}
-                <div>
-                  <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">{responsable?.nome}</p>
-                  <p className="text-xs text-slate-500">{responsable?.email}</p>
+                <div className="flex-1 min-w-0">
+                  <select
+                    value={lead.responsavelId || ''}
+                    onChange={(e) => updateLead(lead.id, { responsavelId: e.target.value })}
+                    aria-label="Responsável"
+                    className="w-full bg-transparent text-sm font-semibold text-slate-900 dark:text-slate-100 outline-none cursor-pointer"
+                  >
+                    <option value="">Sem responsável</option>
+                    {users.map(u => <option key={u.id} value={u.id}>{u.nome}</option>)}
+                  </select>
+                  {responsable?.email && <p className="text-xs text-slate-500 truncate">{responsable.email}</p>}
                 </div>
               </div>
+              {(() => {
+                const r = lead.rastreamento || {};
+                const q = lead.qualificacao || {};
+                const linhas: [string, React.ReactNode][] = [
+                  ['Entrada', formatDate(r.dataEntrada || lead.createdAt)],
+                  ['Plataforma', [r.plataforma, r.posicionamento].filter(Boolean).join(' · ')],
+                  ['Campanha', r.campanha],
+                  ['Anúncio', r.anuncio],
+                  ['Segmento', q.segmento],
+                  ['Faturamento', q.faturamento],
+                  ['Já trabalhou com cacau?', q.jaTrabalhouCacau],
+                  ['Score', q.score !== null && q.score !== undefined ? `${q.score}%` : null],
+                  ['Região', [q.uf, q.regiao].filter(Boolean).join(' · ')],
+                ].filter(([, v]) => v !== null && v !== undefined && v !== '') as [string, React.ReactNode][];
+                return (
+                  <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-800 text-xs">
+                    {linhas.length <= 1 ? (
+                      <p className="text-slate-400">Sem dados de origem para este lead.</p>
+                    ) : (
+                      linhas.map(([k, v]) => (
+                        <div key={k} className="flex justify-between gap-3 py-1 border-b border-slate-100 dark:border-slate-800 last:border-0">
+                          <span className="text-slate-500 shrink-0">{k}</span>
+                          <span className="font-medium text-slate-900 dark:text-slate-100 text-right break-words">{v}</span>
+                        </div>
+                      ))
+                    )}
+                    <button type="button" onClick={() => setActiveTab('estatisticas')} className="mt-2 text-[11px] text-indigo-600 hover:underline">
+                      Ver rastreamento completo
+                    </button>
+                  </div>
+                );
+              })()}
             </div>
 
             {/* Contato Principal */}

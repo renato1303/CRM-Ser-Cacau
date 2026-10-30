@@ -147,7 +147,7 @@ export const Shell: React.FC = () => {
       </div>
 
       <GlobalSearch />
-      <AICopilotDrawer />
+
       <ToastContainer />
       <LoginModal isOpen={loginModalOpen} onClose={() => setLoginModalOpen(false)} />
       <ConfirmDialogHost />

@@ -5,6 +5,7 @@ import {
   Check, ArrowRight, HelpCircle, Lock, Users, Layers, Activity, QrCode, Smartphone, Link as LinkIcon 
 } from 'lucide-react';
 import { useStore } from '../../store/useStore';
+import { confirmDialog } from '../../components/ui/ConfirmDialog';
 import { Button } from '../../components/ui/Button';
 import { db } from '../../services/db/storage';
 
@@ -230,6 +231,44 @@ export const PluginsPage: React.FC = () => {
     const interval = setInterval(checkConnection, 3000);
     return () => { cancelled = true; clearInterval(interval); };
   }, [qrAssistantOpen, qrStep, fixedInstanceName, connName, addToast]);
+
+  // Excluir de verdade: apaga a instância na Evolution e a conexão no servidor (senão ela volta)
+  const handleDeleteQrInstance = async (inst: QRInstance) => {
+    const ok = await confirmDialog({
+      title: `Excluir a conexão "${inst.nomeConexao}"?`,
+      message: 'O número é desconectado do CRM e a instância é apagada na Evolution. Para usar este número de novo, será preciso ler um novo QR Code.',
+      confirmLabel: 'Excluir conexão',
+    });
+    if (!ok) return;
+    const apagarConversas = await confirmDialog({
+      title: 'Apagar também as conversas deste número?',
+      message: 'As conversas e mensagens que vieram por esta conexão saem da tela Chats. Os leads continuam no funil.',
+      confirmLabel: 'Apagar conversas',
+      cancelLabel: 'Manter conversas',
+    });
+    try {
+      const res = await fetch('/api/evolution/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instanceName: inst.instanceName, apagarConversas })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Erro ${res.status}`);
+      if (apagarConversas) {
+        const prefix = `wa:${inst.instanceName}:`;
+        const conversations = db.getConversations().filter(c => !c.id.startsWith(prefix));
+        const messages = db.getMessages().filter(m => !m.conversationId.startsWith(prefix));
+        db.saveConversations(conversations);
+        db.saveMessages(messages);
+        useStore.setState({ conversations, messages });
+      }
+      setQrInstances(prev => prev.filter(i => i.instanceName !== inst.instanceName));
+      setManageQrInstance(null);
+      addToast('Conexão excluída', data.aviso || `${inst.nomeConexao} foi removida do CRM.`, data.aviso ? 'info' : 'success');
+    } catch (err: any) {
+      addToast('Erro ao excluir', err.message || 'Não foi possível excluir a conexão.', 'error');
+    }
+  };
 
   const handleFetchAvailableInstances = async () => {
     setLoadingInstances(true);
@@ -586,7 +625,7 @@ export const PluginsPage: React.FC = () => {
               <Button onClick={() => { setManageQrInstance(null); handleStartQrAssistant(); }} variant="outline" size="sm" className="flex-1 gap-1 text-xs">
                 <RefreshCw className="w-3.5 h-3.5" /> Reconectar
               </Button>
-              <Button onClick={() => { setQrInstances(prev => prev.filter(i => i.id !== manageQrInstance.id)); setManageQrInstance(null); addToast('Removido', 'Instância desconectada.', 'info'); }} variant="outline" size="sm" className="text-xs text-red-400 border-red-500/40 hover:bg-red-500/10">
+              <Button onClick={() => handleDeleteQrInstance(manageQrInstance)} variant="outline" size="sm" className="text-xs text-red-400 border-red-500/40 hover:bg-red-500/10">
                 <Trash2 className="w-3.5 h-3.5" /> Excluir
               </Button>
             </div>

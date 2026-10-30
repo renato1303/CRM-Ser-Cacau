@@ -41,16 +41,7 @@ export const Topbar: React.FC<TopbarProps> = ({ title, subtitle, actions }) => {
           </kbd>
         </button>
 
-        {/* AI Copilot trigger */}
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setAiCopilotOpen(true)}
-          className="gap-2 border-indigo-200 dark:border-indigo-800 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/50"
-        >
-          <Sparkles className="w-4 h-4" />
-          <span className="hidden sm:inline">Copiloto IA</span>
-        </Button>
+
 
         {/* Notifications */}
         <div className="relative">

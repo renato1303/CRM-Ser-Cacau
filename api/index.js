@@ -166,6 +166,16 @@ function pickArray(data) {
   const candidates = [data?.messages?.records, data?.records, data?.messages, data?.chats, data?.data, data?.instances];
   return candidates.find(Array.isArray) || [];
 }
+const removedCache = /* @__PURE__ */ new Map();
+async function isInstanceRemoved(instance) {
+  if (!instance || !supabaseAdmin) return false;
+  const c = removedCache.get(instance);
+  if (c && Date.now() - c.at < 6e4) return c.removed;
+  const { data } = await supabaseAdmin.from("wa_instances").select("removido_em").eq("instance_name", instance).maybeSingle();
+  const removed = Boolean(data?.removido_em);
+  removedCache.set(instance, { removed, at: Date.now() });
+  return removed;
+}
 async function saveIncomingMessage(instance, msg, live) {
   const key = msg?.key || {};
   const { remoteJid, phone } = resolveJid(key);
@@ -244,12 +254,13 @@ async function logWebhook(instance, event, ok, detail) {
   if (!supabaseAdmin) return;
   try {
     await supabaseAdmin.from("wa_webhook_log").insert({ instance, event, ok, detail: detail?.slice(0, 1e3) || null });
-    await supabaseAdmin.from("wa_instances").upsert({
-      instance_name: instance || "desconhecida",
-      last_event_at: (/* @__PURE__ */ new Date()).toISOString(),
-      last_event_type: event,
-      updated_at: (/* @__PURE__ */ new Date()).toISOString()
-    }, { onConflict: "instance_name" });
+    if (instance) {
+      await supabaseAdmin.from("wa_instances").update({
+        last_event_at: (/* @__PURE__ */ new Date()).toISOString(),
+        last_event_type: event,
+        updated_at: (/* @__PURE__ */ new Date()).toISOString()
+      }).eq("instance_name", instance);
+    }
     webhookLogCount++;
     if (webhookLogCount % 200 === 0) {
       const cutoff = new Date(Date.now() - 3 * 24 * 3600 * 1e3).toISOString();
@@ -355,8 +366,11 @@ async function getInstanceInfo(instanceName) {
 async function linkInstance(instanceName, nomeConexao) {
   const info = await getInstanceInfo(instanceName);
   const webhookUrl = await configureWebhook(instanceName);
+  removedCache.delete(instanceName);
   check(await db().from("wa_instances").upsert({
     instance_name: instanceName,
+    removido_em: null,
+    conversas_apagadas: false,
     nome_conexao: nomeConexao || info.profileName || instanceName,
     status: info.state,
     numero: info.numero,
@@ -498,8 +512,11 @@ app.post("/api/evolution/create", async (req, res) => {
       console.error("[Evolution create]", webhookWarning);
     }
     if (supabaseAdmin) {
+      removedCache.delete(instanceName);
       const { error } = await supabaseAdmin.from("wa_instances").upsert({
         instance_name: instanceName,
+        removido_em: null,
+        conversas_apagadas: false,
         nome_conexao: options?.nomeConexao || instanceName,
         status: "connecting",
         updated_at: (/* @__PURE__ */ new Date()).toISOString()
@@ -555,17 +572,65 @@ app.post("/api/evolution/logout", async (req, res) => {
     return res.status(502).json({ error: errorMessage(err) });
   }
 });
+async function removeInstance(instanceName, apagarConversas) {
+  const avisos = [];
+  try {
+    await evo(`/instance/logout/${enc(instanceName)}`, { method: "DELETE" });
+  } catch (err) {
+    if (!(err instanceof EvolutionError) || err.status !== 404) avisos.push(`desconectar: ${errorMessage(err)}`);
+  }
+  try {
+    await evo(`/instance/delete/${enc(instanceName)}`, { method: "DELETE" });
+  } catch (err) {
+    if (!(err instanceof EvolutionError) || err.status !== 404) avisos.push(`apagar na Evolution: ${errorMessage(err)}`);
+  }
+  const sb = db();
+  check(await sb.from("wa_instances").upsert({
+    instance_name: instanceName,
+    removido_em: (/* @__PURE__ */ new Date()).toISOString(),
+    status: "removida",
+    conversas_apagadas: apagarConversas,
+    updated_at: (/* @__PURE__ */ new Date()).toISOString()
+  }, { onConflict: "instance_name" }), "marcar conexão como removida");
+  removedCache.set(instanceName, { removed: true, at: Date.now() });
+  if (apagarConversas) {
+    check(await sb.from("wa_conversations").delete().eq("instance_name", instanceName), "apagar conversas da conexão");
+  }
+  return avisos;
+}
+app.post("/api/evolution/remove", async (req, res) => {
+  const { instanceName, apagarConversas } = req.body || {};
+  if (!instanceName) return res.status(400).json({ error: "instanceName é obrigatório" });
+  try {
+    const avisos = await removeInstance(String(instanceName), Boolean(apagarConversas));
+    return res.json({ success: true, avisos });
+  } catch (err) {
+    return res.status(500).json({ error: errorMessage(err) });
+  }
+});
 app.post("/api/evolution/delete", async (req, res) => {
-  const { instanceName } = req.body || {};
+  const { instanceName, apagarConversas } = req.body || {};
+  if (!instanceName) return res.status(400).json({ error: "instanceName é obrigatório" });
+  let evolutionAviso = null;
   try {
     await evo(`/instance/delete/${enc(instanceName)}`, { method: "DELETE" });
   } catch (err) {
     if (!(err instanceof EvolutionError) || err.status !== 404) {
-      return res.status(502).json({ error: errorMessage(err) });
+      evolutionAviso = `A Evolution não confirmou a exclusão (${errorMessage(err)}). A conexão foi removida do CRM mesmo assim.`;
+      console.warn("[Evolution delete]", evolutionAviso);
     }
   }
-  if (supabaseAdmin) await supabaseAdmin.from("wa_instances").delete().eq("instance_name", instanceName);
-  return res.json({ success: true });
+  try {
+    if (supabaseAdmin) {
+      await supabaseAdmin.from("wa_instances").delete().eq("instance_name", instanceName);
+      if (apagarConversas) {
+        await supabaseAdmin.from("wa_conversations").delete().eq("instance_name", instanceName);
+      }
+    }
+    return res.json({ success: true, aviso: evolutionAviso });
+  } catch (err) {
+    return res.status(500).json({ error: errorMessage(err) });
+  }
 });
 app.get("/api/webhook/whatsapp-qr", (_req, res) => {
   res.json({ ok: true, message: "Webhook do CRM acessível. A Evolution deve enviar POST para este endereço." });
@@ -580,6 +645,14 @@ app.post("/api/webhook/whatsapp-qr", async (req, res) => {
     await logWebhook(instance, event, false, "Segredo do webhook inválido");
     return res.sendStatus(401);
   }
+  if (await isInstanceRemoved(instance)) return res.sendStatus(200);
+  if (supabaseAdmin && instance) {
+    const { data: linked } = await supabaseAdmin.from("wa_instances").select("instance_name").eq("instance_name", instance).maybeSingle();
+    if (!linked) {
+      await logWebhook(instance, event, true, "Ignorado: instância não vinculada ao CRM");
+      return res.sendStatus(200);
+    }
+  }
   try {
     const data = body.data;
     const items = Array.isArray(data) ? data : Array.isArray(data?.messages) ? data.messages : data ? [data] : [];
@@ -590,10 +663,10 @@ app.post("/api/webhook/whatsapp-qr", async (req, res) => {
     } else if (event === "connection.update") {
       const state = data?.state;
       if (state && supabaseAdmin) {
-        const update = { instance_name: instance, status: state, updated_at: (/* @__PURE__ */ new Date()).toISOString() };
+        const update = { status: state, updated_at: (/* @__PURE__ */ new Date()).toISOString() };
         if (data?.wuid) update.numero = formatPhone(data.wuid);
         if (data?.profileName) update.perfil_nome = data.profileName;
-        await supabaseAdmin.from("wa_instances").upsert(update, { onConflict: "instance_name" });
+        await supabaseAdmin.from("wa_instances").update(update).eq("instance_name", instance);
       }
     } else if (event === "contacts.upsert" || event === "contacts.update") {
       await updateContactNames(instance, items);
@@ -690,7 +763,9 @@ app.get("/api/wa/feed", async (req, res) => {
     let nextSince = maxAll;
     if (convTruncated) nextSince = lastConv < nextSince ? lastConv : nextSince;
     if (msgTruncated) nextSince = lastMsg < nextSince ? lastMsg : nextSince;
+    const { data: removidas } = await sb.from("wa_instances").select("instance_name").eq("conversas_apagadas", true);
     return res.json({
+      instanciasRemovidas: (removidas || []).map((r) => r.instance_name),
       conversations: convs.map((c) => ({
         id: c.id,
         canal: "whatsapp",
@@ -1663,7 +1738,7 @@ app.post("/api/disparos/registrar", async (req, res) => {
 });
 app.get("/api/crm/data", async (_req, res) => {
   if (!supabaseAdmin) return res.status(503).json({ error: "Supabase não configurado no servidor" });
-  const { data, error } = await supabaseAdmin.from("wa_instances").select("*").order("created_at", { ascending: false });
+  const { data, error } = await supabaseAdmin.from("wa_instances").select("*").is("removido_em", null).order("created_at", { ascending: false });
   if (error) return res.status(500).json({ error: error.message });
   return res.json({
     wa_qr_instances: (data || []).filter((i) => i.nome_conexao || i.numero).map((i) => ({
