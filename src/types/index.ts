@@ -130,6 +130,16 @@ export interface Lead {
   valorFechado?: number;
   rastreamento?: LeadTracking;
   qualificacao?: LeadQualification;
+  disparos?: LeadDispatch[];
+}
+
+// Mensagens enviadas pelos disparos do n8n
+export interface LeadDispatch {
+  etapa: string;
+  em: string;
+  instancia?: string | null;
+  status?: 'enviado' | 'erro';
+  erro?: string;
 }
 
 export interface Contact {

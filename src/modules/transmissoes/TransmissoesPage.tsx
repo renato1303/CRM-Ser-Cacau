@@ -17,17 +17,8 @@ export const TransmissoesPage: React.FC = () => {
 
   const eligibleContacts = contacts.filter(c => c.consentimentoMarketing);
 
-  const [campaigns, setCampaigns] = useState<any[]>([
-    {
-      id: 'camp-1',
-      nome: 'Boas-vindas VIP',
-      canal: 'whatsapp',
-      total: eligibleContacts.length,
-      enviadas: eligibleContacts.length,
-      lidas: Math.floor(eligibleContacts.length * 0.8),
-      status: 'concluida',
-    }
-  ]);
+  // Sem campanhas de exemplo: os disparos reais de follow-up ainda serão construídos
+  const [campaigns, setCampaigns] = useState<any[]>([]);
 
   const handleCreateCampaign = (e: React.FormEvent) => {
     e.preventDefault();
@@ -39,17 +30,11 @@ export const TransmissoesPage: React.FC = () => {
       canal: campCanal,
       total: eligibleContacts.length,
       enviadas: eligibleContacts.length,
-      lidas: Math.floor(eligibleContacts.length * 0.75),
+      lidas: 0,
       status: 'concluida',
     };
 
     setCampaigns(prev => [newCamp, ...prev]);
-
-    // Simulate sending messages that land in chats
-    eligibleContacts.slice(0, 3).forEach(contact => {
-      const conv = createConversation(contact.id, undefined, campCanal as any);
-      sendMessage(conv.id, `Olá ${contact.nome}, temos uma oferta especial para sua empresa!`, 'saida', 'usuario');
-    });
 
     setCampNome('');
     setModalOpen(false);
@@ -62,9 +47,13 @@ export const TransmissoesPage: React.FC = () => {
           <h2 className="text-xl font-bold text-slate-900 dark:text-slate-100">Transmissões em Massa</h2>
           <p className="text-xs text-slate-500">Campanhas segmentadas respeitando o opt-in de consentimento de marketing.</p>
         </div>
-        <Button size="sm" onClick={() => setModalOpen(true)} className="gap-2">
+        <Button size="sm" disabled title="Os disparos reais de follow-up pelo WhatsApp ainda serão construídos" className="gap-2">
           <Plus className="w-4 h-4" /> Nova Campanha
         </Button>
+      </div>
+
+      <div className="mb-6 p-4 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-xs text-amber-800 dark:text-amber-200">
+        Os envios em massa ainda não estão ativos. Eles entram na etapa dos disparos de follow-up, com envio real pelo WhatsApp e métricas de entrega e leitura.
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
@@ -78,7 +67,7 @@ export const TransmissoesPage: React.FC = () => {
         </div>
         <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm">
           <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Taxa Média de Leitura</span>
-          <h3 className="text-2xl font-bold text-green-600 mt-2">82.5%</h3>
+          <h3 className="text-2xl font-bold text-slate-400 mt-2">—</h3>
         </div>
       </div>
 

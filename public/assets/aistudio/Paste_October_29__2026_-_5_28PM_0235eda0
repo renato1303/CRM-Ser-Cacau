@@ -1,0 +1,897 @@
+ESTATÍSTICAS COM DADOS REAIS (parte B de 2): todas as abas de Estatísticas passam a usar só dados reais (zeradas quando não houver dados), com o tempo de resposta separado em segunda a sexta e fim de semana; a tela de Transmissões deixa de criar campanhas e conversas fictícias.
+
+REGRAS (obrigatórias):
+- Use EXATAMENTE o código abaixo, caractere por caractere. Não resuma, não reescreva, não "melhore" e não renomeie nada.
+- Não adicione dados simulados, mocks, números de exemplo nem valores fixos em telas de análise.
+- Não altere nenhum outro arquivo nem outras partes dos arquivos citados.
+- Ao terminar, responda apenas com a lista do que foi alterado.
+
+----------------------------------------------------------------
+ALTERAÇÃO 1 — Criar (ou substituir, se já existir) o arquivo src/modules/painel/metrics.ts com:
+
+===== INÍCIO DO src/modules/painel/metrics.ts =====
+import { Conversation, Lead, Message, Pipeline, Stage } from '../../types';
+
+// ==========================================
+// Datas no fuso de São Paulo (o time e os clientes estão no Brasil,
+// mesmo que o navegador esteja em outro fuso)
+// ==========================================
+const TZ = 'America/Sao_Paulo';
+const keyFmt = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
+const weekdayFmt = new Intl.DateTimeFormat('en-US', { timeZone: TZ, weekday: 'short' });
+
+// "2026-10-29" no fuso de São Paulo
+export function dayKey(iso: string | Date): string {
+  const d = typeof iso === 'string' ? new Date(iso) : iso;
+  if (Number.isNaN(d.getTime())) return '';
+  return keyFmt.format(d);
+}
+
+export function isWeekend(iso: string): boolean {
+  const w = weekdayFmt.format(new Date(iso));
+  return w === 'Sat' || w === 'Sun';
+}
+
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+export const WEEKDAY_LABELS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+export function weekdayIndex(iso: string): number {
+  return WEEKDAYS.indexOf(weekdayFmt.format(new Date(iso)));
+}
+
+export function addDays(key: string, days: number): string {
+  const d = new Date(`${key}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+export function daysBetween(from: string, to: string): number {
+  return Math.round((new Date(`${to}T12:00:00Z`).getTime() - new Date(`${from}T12:00:00Z`).getTime()) / 86400000);
+}
+
+export type PeriodId = 'hoje' | '7d' | '30d' | 'mes' | 'mes_passado' | 'personalizado';
+export interface Period { from: string; to: string; }
+
+export function resolvePeriod(id: PeriodId, custom?: Period, today = dayKey(new Date())): Period {
+  switch (id) {
+    case 'hoje': return { from: today, to: today };
+    case '7d': return { from: addDays(today, -6), to: today };
+    case '30d': return { from: addDays(today, -29), to: today };
+    case 'mes': return { from: `${today.slice(0, 7)}-01`, to: today };
+    case 'mes_passado': {
+      const firstThis = `${today.slice(0, 7)}-01`;
+      const lastPrev = addDays(firstThis, -1);
+      return { from: `${lastPrev.slice(0, 7)}-01`, to: lastPrev };
+    }
+    case 'personalizado': {
+      const from = custom?.from || today;
+      const to = custom?.to || today;
+      return from <= to ? { from, to } : { from: to, to: from };
+    }
+  }
+}
+
+// Período anterior com a mesma quantidade de dias (para comparar)
+export function previousPeriod(p: Period): Period {
+  const len = daysBetween(p.from, p.to) + 1;
+  return { from: addDays(p.from, -len), to: addDays(p.from, -1) };
+}
+
+export const inPeriod = (iso: string | undefined | null, p: Period) => {
+  if (!iso) return false;
+  const k = dayKey(iso);
+  return !!k && k >= p.from && k <= p.to;
+};
+
+// ==========================================
+// Leads e vendas
+// ==========================================
+export const leadEntryDate = (l: Lead) => l.rastreamento?.dataEntrada || l.createdAt;
+export const leadClosedDate = (l: Lead) => l.closedAt || l.updatedAt;
+
+export function stageTypeIndex(pipelines: Pipeline[]) {
+  const m = new Map<string, Stage>();
+  pipelines.forEach(p => p.stages.forEach(s => m.set(s.id, s)));
+  return m;
+}
+
+export function volumeMetrics(leads: Lead[], stages: Map<string, Stage>, p: Period) {
+  const novos = leads.filter(l => inPeriod(leadEntryDate(l), p));
+  const isWon = (l: Lead) => stages.get(l.stageId)?.tipo === 'ganho';
+  const isLost = (l: Lead) => stages.get(l.stageId)?.tipo === 'perdido';
+  const abertos = novos.filter(l => !isWon(l) && !isLost(l));
+  const vendas = leads.filter(l => isWon(l) && inPeriod(leadClosedDate(l), p));
+  const perdas = leads.filter(l => isLost(l) && inPeriod(leadClosedDate(l), p));
+  const valorVendas = vendas.reduce((a, l) => a + (l.valorFechado ?? l.valor ?? 0), 0);
+  const novosGanhos = novos.filter(isWon).length;
+  return {
+    novos: novos.length,
+    abertos: abertos.length,
+    valorNegociado: abertos.reduce((a, l) => a + (l.valor || 0), 0),
+    vendas: vendas.length,
+    valorVendas,
+    ticketMedio: vendas.length ? valorVendas / vendas.length : 0,
+    perdas: perdas.length,
+    // Dos leads que entraram no período, quantos já viraram venda
+    conversao: novos.length ? novosGanhos / novos.length : 0,
+  };
+}
+
+export function dailySeries(leads: Lead[], stages: Map<string, Stage>, p: Period) {
+  const days = daysBetween(p.from, p.to) + 1;
+  const map = new Map<string, { dia: string; leads: number; vendas: number }>();
+  for (let i = 0; i < days; i++) {
+    const k = addDays(p.from, i);
+    map.set(k, { dia: `${k.slice(8, 10)}/${k.slice(5, 7)}`, leads: 0, vendas: 0 });
+  }
+  for (const l of leads) {
+    const e = map.get(dayKey(leadEntryDate(l)));
+    if (e) e.leads++;
+    if (stages.get(l.stageId)?.tipo === 'ganho') {
+      const c = map.get(dayKey(leadClosedDate(l)));
+      if (c) c.vendas++;
+    }
+  }
+  return [...map.values()];
+}
+
+// ==========================================
+// Atendimento (tempo corrido, 24 horas por dia)
+// Uma espera começa na primeira mensagem do cliente sem resposta
+// e termina na próxima mensagem enviada pela equipe (CRM ou celular).
+// ==========================================
+export type DayFilter = 'todos' | 'semana' | 'fim_de_semana';
+
+export interface ResponseSample {
+  conversationId: string;
+  waitingSince: string; // mensagem do cliente
+  answeredAt: string;   // resposta da equipe
+  ms: number;
+  first: boolean;       // primeira resposta da conversa
+}
+
+export function responseSamples(messages: Message[]): ResponseSample[] {
+  const byConv = new Map<string, Message[]>();
+  for (const m of messages) {
+    if (m.direcao === 'interna') continue;
+    if (!byConv.has(m.conversationId)) byConv.set(m.conversationId, []);
+    byConv.get(m.conversationId)!.push(m);
+  }
+  const out: ResponseSample[] = [];
+  for (const [conversationId, list] of byConv) {
+    list.sort((a, b) => new Date(a.enviadaAt).getTime() - new Date(b.enviadaAt).getTime());
+    let waiting: Message | null = null;
+    let answeredBefore = false;
+    for (const m of list) {
+      if (m.direcao === 'entrada') {
+        if (!waiting) waiting = m;
+      } else if (m.direcao === 'saida' && m.autor === 'usuario' && waiting) {
+        const ms = new Date(m.enviadaAt).getTime() - new Date(waiting.enviadaAt).getTime();
+        if (ms >= 0) {
+          out.push({ conversationId, waitingSince: waiting.enviadaAt, answeredAt: m.enviadaAt, ms, first: !answeredBefore });
+          answeredBefore = true;
+        }
+        waiting = null;
+      } else if (m.direcao === 'saida' && m.autor === 'usuario') {
+        answeredBefore = true; // a equipe falou primeiro
+      }
+    }
+  }
+  return out;
+}
+
+export function matchesDayFilter(iso: string, f: DayFilter) {
+  if (f === 'todos') return true;
+  return f === 'fim_de_semana' ? isWeekend(iso) : !isWeekend(iso);
+}
+
+const median = (v: number[]) => {
+  if (!v.length) return undefined;
+  const s = [...v].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+};
+const mean = (v: number[]) => (v.length ? v.reduce((a, b) => a + b, 0) / v.length : undefined);
+
+export function responseMetrics(samples: ResponseSample[], p: Period, dayFilter: DayFilter, goalMinutes: number) {
+  const s = samples.filter(x => inPeriod(x.waitingSince, p) && matchesDayFilter(x.waitingSince, dayFilter));
+  const firsts = s.filter(x => x.first).map(x => x.ms);
+  const all = s.map(x => x.ms);
+  const goalMs = goalMinutes * 60000;
+  return {
+    respostas: all.length,
+    conversasAtendidas: firsts.length,
+    primeiraMedia: mean(firsts),
+    primeiraMediana: median(firsts),
+    respostaMedia: mean(all),
+    respostaMediana: median(all),
+    dentroDaMeta: firsts.length ? firsts.filter(ms => ms <= goalMs).length / firsts.length : undefined,
+  };
+}
+
+// Média da primeira resposta por dia da semana (Dom..Sáb)
+export function responseByWeekday(samples: ResponseSample[], p: Period) {
+  const buckets = WEEKDAY_LABELS.map(() => [] as number[]);
+  for (const x of samples) {
+    if (!x.first || !inPeriod(x.waitingSince, p)) continue;
+    buckets[weekdayIndex(x.waitingSince)]?.push(x.ms);
+  }
+  return WEEKDAY_LABELS.map((dia, i) => ({
+    dia,
+    minutos: buckets[i].length ? Math.round(mean(buckets[i])! / 60000) : 0,
+    conversas: buckets[i].length,
+  }));
+}
+
+// Conversas em que a última mensagem é do cliente (aguardando resposta agora)
+export function waitingNow(conversations: Conversation[], messages: Message[]) {
+  const last = new Map<string, Message>();
+  for (const m of messages) {
+    if (m.direcao === 'interna') continue;
+    if (m.direcao === 'saida' && m.autor !== 'usuario') continue; // resposta automática não conta como atendimento
+    const cur = last.get(m.conversationId);
+    if (!cur || new Date(m.enviadaAt).getTime() >= new Date(cur.enviadaAt).getTime()) last.set(m.conversationId, m);
+  }
+  const now = Date.now();
+  return conversations
+    .map(c => ({ conv: c, msg: last.get(c.id) }))
+    .filter(x => x.msg && x.msg.direcao === 'entrada' && x.conv.status !== 'encerrada')
+    .map(x => ({ conversation: x.conv, since: x.msg!.enviadaAt, ms: now - new Date(x.msg!.enviadaAt).getTime() }))
+    .sort((a, b) => b.ms - a.ms);
+}
+
+export function formatDuration(ms?: number): string {
+  if (ms === undefined || Number.isNaN(ms)) return '—';
+  const min = Math.round(ms / 60000);
+  if (min < 1) return 'menos de 1 min';
+  if (min < 60) return `${min} min`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h} h ${min % 60 ? `${min % 60} min` : ''}`.trim();
+  const d = Math.floor(h / 24);
+  return `${d} d ${h % 24 ? `${h % 24} h` : ''}`.trim();
+}
+
+// ==========================================
+// Origem: canal, campanha e anúncio
+// ==========================================
+export function leadChannel(l: Lead): string {
+  if (l.planilhaId) return 'Planilha (formulário)';
+  if (l.id.startsWith('wa-')) return 'WhatsApp';
+  return 'Cadastro manual';
+}
+
+export function originTable(leads: Lead[], stages: Map<string, Stage>, p: Period, pick: (l: Lead) => string | null | undefined) {
+  const rows = new Map<string, { nome: string; leads: number; vendas: number; valor: number }>();
+  for (const l of leads) {
+    if (!inPeriod(leadEntryDate(l), p)) continue;
+    const nome = pick(l) || 'Sem informação';
+    if (!rows.has(nome)) rows.set(nome, { nome, leads: 0, vendas: 0, valor: 0 });
+    const r = rows.get(nome)!;
+    r.leads++;
+    if (stages.get(l.stageId)?.tipo === 'ganho') { r.vendas++; r.valor += l.valorFechado ?? l.valor ?? 0; }
+  }
+  return [...rows.values()].sort((a, b) => b.leads - a.leads);
+}
+
+// Funil: leads do período em cada etapa e quantos chegaram até ela ou além
+export function funnel(leads: Lead[], pipeline: Pipeline | undefined, p: Period) {
+  if (!pipeline) return [];
+  const ordered = [...pipeline.stages].sort((a, b) => a.ordem - b.ordem);
+  const normal = ordered.filter(s => s.tipo !== 'perdido');
+  const pos = new Map(normal.map((s, i) => [s.id, i]));
+  const periodLeads = leads.filter(l => l.pipelineId === pipeline.id && inPeriod(leadEntryDate(l), p));
+  const total = periodLeads.length;
+  return normal.map((s, i) => {
+    const naEtapa = periodLeads.filter(l => l.stageId === s.id).length;
+    const chegaram = periodLeads.filter(l => (pos.get(l.stageId) ?? -1) >= i).length;
+    return { id: s.id, nome: s.nome, cor: s.cor, naEtapa, chegaram, pct: total ? chegaram / total : 0 };
+  });
+}
+
+// ==========================================
+// Estatísticas detalhadas
+// ==========================================
+const hourFmt = new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: '2-digit', hourCycle: 'h23' });
+export function hourOfDay(iso: string): number {
+  return Number(hourFmt.format(new Date(iso))) % 24;
+}
+
+function stats(values: number[], goalMs: number) {
+  return {
+    total: values.length,
+    media: mean(values),
+    mediana: median(values),
+    dentroDaMeta: values.length ? values.filter(v => v <= goalMs).length / values.length : undefined,
+  };
+}
+
+const firstsIn = (samples: ResponseSample[], p: Period, f: DayFilter) =>
+  samples.filter(x => x.first && inPeriod(x.waitingSince, p) && matchesDayFilter(x.waitingSince, f));
+
+// Seg a sex x fim de semana, lado a lado
+export function weekdayVsWeekend(samples: ResponseSample[], p: Period, goalMinutes: number) {
+  const goal = goalMinutes * 60000;
+  const all = (f: DayFilter) => samples.filter(x => inPeriod(x.waitingSince, p) && matchesDayFilter(x.waitingSince, f)).map(x => x.ms);
+  return {
+    semana: { primeira: stats(firstsIn(samples, p, 'semana').map(x => x.ms), goal), resposta: stats(all('semana'), goal) },
+    fimDeSemana: { primeira: stats(firstsIn(samples, p, 'fim_de_semana').map(x => x.ms), goal), resposta: stats(all('fim_de_semana'), goal) },
+  };
+}
+
+// Faixas de tempo da 1ª resposta
+export const RESPONSE_BUCKETS = [
+  { label: 'Até 5 min', max: 5 },
+  { label: '5 a 15 min', max: 15 },
+  { label: '15 a 60 min', max: 60 },
+  { label: '1 a 4 h', max: 240 },
+  { label: '4 a 24 h', max: 1440 },
+  { label: 'Mais de 24 h', max: Infinity },
+];
+export function firstResponseDistribution(samples: ResponseSample[], p: Period, f: DayFilter) {
+  const firsts = firstsIn(samples, p, f);
+  return RESPONSE_BUCKETS.map((b, i) => {
+    const min = i === 0 ? -1 : RESPONSE_BUCKETS[i - 1].max;
+    const count = firsts.filter(x => x.ms / 60000 > min && x.ms / 60000 <= b.max).length;
+    return { faixa: b.label, conversas: count, pct: firsts.length ? count / firsts.length : 0 };
+  });
+}
+
+// Por dia da semana, com mediana e % na meta
+export function weekdayTable(samples: ResponseSample[], p: Period, goalMinutes: number) {
+  const goal = goalMinutes * 60000;
+  return WEEKDAY_LABELS.map((dia, i) => {
+    const v = samples.filter(x => x.first && inPeriod(x.waitingSince, p) && weekdayIndex(x.waitingSince) === i).map(x => x.ms);
+    return { dia, ...stats(v, goal) };
+  });
+}
+
+// 1ª resposta média por hora do dia em que o cliente escreveu
+export function hourlyFirstResponse(samples: ResponseSample[], p: Period, f: DayFilter) {
+  const buckets = Array.from({ length: 24 }, () => [] as number[]);
+  for (const x of firstsIn(samples, p, f)) buckets[hourOfDay(x.waitingSince)].push(x.ms);
+  return buckets.map((v, h) => ({ hora: `${String(h).padStart(2, '0')}h`, minutos: v.length ? Math.round(mean(v)! / 60000) : 0, conversas: v.length }));
+}
+
+// Mensagens recebidas e enviadas por dia
+export function messageVolume(messages: Message[], p: Period) {
+  const days = daysBetween(p.from, p.to) + 1;
+  const map = new Map<string, { dia: string; recebidas: number; enviadas: number }>();
+  for (let i = 0; i < days; i++) {
+    const k = addDays(p.from, i);
+    map.set(k, { dia: `${k.slice(8, 10)}/${k.slice(5, 7)}`, recebidas: 0, enviadas: 0 });
+  }
+  for (const m of messages) {
+    const e = map.get(dayKey(m.enviadaAt));
+    if (!e) continue;
+    if (m.direcao === 'entrada') e.recebidas++;
+    else if (m.direcao === 'saida') e.enviadas++;
+  }
+  return [...map.values()];
+}
+
+// Ciclo de venda: dias entre a entrada do lead e o fechamento (vendas do período)
+export function salesCycleDays(leads: Lead[], stages: Map<string, Stage>, p: Period) {
+  const v = leads
+    .filter(l => stages.get(l.stageId)?.tipo === 'ganho' && inPeriod(leadClosedDate(l), p))
+    .map(l => (new Date(leadClosedDate(l)).getTime() - new Date(leadEntryDate(l)).getTime()) / 86400000)
+    .filter(d => d >= 0);
+  return { media: mean(v), mediana: median(v), vendas: v.length };
+}
+
+// Motivos de perda no período
+export function lossReasonsTable(leads: Lead[], stages: Map<string, Stage>, p: Period, names: Map<string, string>) {
+  const m = new Map<string, number>();
+  for (const l of leads) {
+    if (stages.get(l.stageId)?.tipo !== 'perdido' || !inPeriod(leadClosedDate(l), p)) continue;
+    const nome = (l.motivoPerdaId && names.get(l.motivoPerdaId)) || 'Sem motivo informado';
+    m.set(nome, (m.get(nome) || 0) + 1);
+  }
+  return [...m.entries()].map(([motivo, total]) => ({ motivo, total })).sort((a, b) => b.total - a.total);
+}
+===== FIM DO src/modules/painel/metrics.ts =====
+
+----------------------------------------------------------------
+ALTERAÇÃO 2 — Substituir TODO o conteúdo de src/modules/estatisticas/EstatisticasPage.tsx por:
+
+===== INÍCIO DO src/modules/estatisticas/EstatisticasPage.tsx =====
+import React, { useMemo, useState } from 'react';
+import { Download, Timer, Clock, Target, MessageSquare, AlertCircle, CalendarDays, Sun } from 'lucide-react';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts';
+import { useStore } from '../../store/useStore';
+import { formatCurrency, cn } from '../../utils/cn';
+import { Button } from '../../components/ui/Button';
+import { Tabs } from '../../components/ui/Tabs';
+import {
+  DayFilter, PeriodId, Period, dayKey, resolvePeriod, previousPeriod, stageTypeIndex, volumeMetrics, funnel,
+  responseSamples, responseMetrics, weekdayVsWeekend, firstResponseDistribution, weekdayTable, hourlyFirstResponse,
+  messageVolume, salesCycleDays, lossReasonsTable, originTable, leadChannel, formatDuration, waitingNow,
+  inPeriod, leadEntryDate, leadClosedDate
+} from '../painel/metrics';
+
+type SubTab = 'vendas' | 'consolidado' | 'origens' | 'metas' | 'atendimento';
+
+const PERIODS: { id: PeriodId; label: string }[] = [
+  { id: 'hoje', label: 'Hoje' },
+  { id: '7d', label: 'Últimos 7 dias' },
+  { id: '30d', label: 'Últimos 30 dias' },
+  { id: 'mes', label: 'Este mês' },
+  { id: 'mes_passado', label: 'Mês passado' },
+  { id: 'personalizado', label: 'Personalizado' },
+];
+const GOAL_KEY = 'conversa_crm_meta_resposta_min';
+const INVEST_KEY = 'conversa_crm_investimento_origens_v1';
+
+const pct = (v?: number) => (v === undefined || Number.isNaN(v) ? '—' : `${Math.round(v * 100)}%`);
+const days = (v?: number) => (v === undefined ? '—' : `${v.toFixed(1).replace('.', ',')} dias`);
+const fmtDate = (k: string) => `${k.slice(8, 10)}/${k.slice(5, 7)}/${k.slice(0, 4)}`;
+const tick = { fontSize: 11, fill: '#94A3B8' };
+
+const Box: React.FC<{ title?: string; subtitle?: string; right?: React.ReactNode; children: React.ReactNode; className?: string }> = ({ title, subtitle, right, children, className }) => (
+  <div className={cn('bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm p-5', className)}>
+    {(title || right) && (
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+        <div>
+          {title && <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">{title}</h3>}
+          {subtitle && <p className="text-[11px] text-slate-500">{subtitle}</p>}
+        </div>
+        {right}
+      </div>
+    )}
+    {children}
+  </div>
+);
+
+const Kpi: React.FC<{ label: string; value: string; sub?: string; icon?: React.ReactNode; tone?: string }> = ({ label, value, sub, icon, tone }) => (
+  <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50">
+    <p className="text-[11px] text-slate-500 flex items-center gap-1">{icon}{label}</p>
+    <p className={cn('text-xl font-bold', tone || 'text-slate-900 dark:text-slate-100')}>{value}</p>
+    {sub && <p className="text-[11px] text-slate-500">{sub}</p>}
+  </div>
+);
+
+const Empty: React.FC<{ text?: string }> = ({ text }) => (
+  <p className="text-xs text-slate-400 py-8 text-center">{text || 'Ainda não há dados neste período.'}</p>
+);
+
+const Table: React.FC<{ head: string[]; rows: React.ReactNode[][]; align?: ('l' | 'r')[] }> = ({ head, rows, align }) => (
+  <div className="overflow-x-auto">
+    <table className="w-full text-xs">
+      <thead className="text-[11px] text-slate-500">
+        <tr>{head.map((h, i) => <th key={h} className={cn('font-medium pb-2 px-2', (align?.[i] || (i ? 'r' : 'l')) === 'r' ? 'text-right' : 'text-left')}>{h}</th>)}</tr>
+      </thead>
+      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+        {rows.map((r, ri) => (
+          <tr key={ri}>{r.map((c, i) => <td key={i} className={cn('py-2 px-2 text-slate-700 dark:text-slate-300', (align?.[i] || (i ? 'r' : 'l')) === 'r' ? 'text-right' : 'text-left')}>{c}</td>)}</tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+);
+
+function downloadCsv(name: string, head: string[], rows: (string | number)[][]) {
+  const esc = (v: string | number) => `"${String(v).replace(/"/g, '""')}"`;
+  const csv = [head, ...rows].map(r => r.map(esc).join(';')).join('\n');
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export const EstatisticasPage: React.FC = () => {
+  const { leads, users, tasks, messages, conversations, pipelines, lossReasons, currentUser, updateCurrentUser } = useStore();
+  const [subTab, setSubTab] = useState<SubTab>('vendas');
+  const [periodId, setPeriodId] = useState<PeriodId>('30d');
+  const [custom, setCustom] = useState<Period>({ from: dayKey(new Date()), to: dayKey(new Date()) });
+  const [dayFilter, setDayFilter] = useState<DayFilter>('todos');
+  const [goal, setGoal] = useState<number>(() => Number(localStorage.getItem(GOAL_KEY)) || 15);
+  const [originTab, setOriginTab] = useState<'canal' | 'campanha' | 'anuncio'>('campanha');
+  const [invest, setInvest] = useState<Record<string, number>>(() => {
+    try { return JSON.parse(localStorage.getItem(INVEST_KEY) || '{}'); } catch { return {}; }
+  });
+
+  const period = resolvePeriod(periodId, custom);
+  const prev = previousPeriod(period);
+  const stages = useMemo(() => stageTypeIndex(pipelines), [pipelines]);
+  const vol = useMemo(() => volumeMetrics(leads, stages, period), [leads, stages, period.from, period.to]);
+  const cycle = useMemo(() => salesCycleDays(leads, stages, period), [leads, stages, period.from, period.to]);
+  const pipeline = pipelines[0];
+  const funnelRows = useMemo(() => funnel(leads, pipeline, period), [leads, pipeline, period.from, period.to]);
+  const lossNames = useMemo(() => new Map(lossReasons.map(r => [r.id, r.nome])), [lossReasons]);
+  const losses = useMemo(() => lossReasonsTable(leads, stages, period, lossNames), [leads, stages, period.from, period.to, lossNames]);
+
+  const samples = useMemo(() => responseSamples(messages), [messages]);
+  const resp = responseMetrics(samples, period, dayFilter, goal);
+  const respPrev = responseMetrics(samples, prev, dayFilter, goal);
+  const split = weekdayVsWeekend(samples, period, goal);
+  const dist = firstResponseDistribution(samples, period, dayFilter);
+  const byWeekday = weekdayTable(samples, period, goal);
+  const byHour = hourlyFirstResponse(samples, period, dayFilter);
+  const msgVol = useMemo(() => messageVolume(messages, period), [messages, period.from, period.to]);
+  const waiting = useMemo(() => waitingNow(conversations, messages), [conversations, messages]);
+
+  const pickOrigin = originTab === 'canal' ? leadChannel
+    : originTab === 'campanha' ? (l: any) => l.rastreamento?.campanha
+    : (l: any) => l.rastreamento?.anuncio;
+  const origins = useMemo(() => originTable(leads, stages, period, pickOrigin), [leads, stages, period.from, period.to, originTab]);
+
+  const setInvestment = (key: string, value: number) => {
+    const next = { ...invest, [key]: value };
+    setInvest(next);
+    localStorage.setItem(INVEST_KEY, JSON.stringify(next));
+  };
+
+  // Relatório por responsável (inclui "Sem responsável" quando houver)
+  const consolidated = useMemo(() => {
+    const isWon = (stageId: string) => stages.get(stageId)?.tipo === 'ganho';
+    const isLost = (stageId: string) => stages.get(stageId)?.tipo === 'perdido';
+    const people = [...users.map(u => ({ id: u.id, nome: u.nome })), { id: '', nome: 'Sem responsável' }];
+    return people.map(p => {
+      const mine = leads.filter(l => (l.responsavelId || '') === p.id);
+      const novos = mine.filter(l => inPeriod(leadEntryDate(l), period));
+      const vendas = mine.filter(l => isWon(l.stageId) && inPeriod(leadClosedDate(l), period));
+      const valor = vendas.reduce((a, l) => a + (l.valorFechado ?? l.valor ?? 0), 0);
+      const abertos = mine.filter(l => !isWon(l.stageId) && !isLost(l.stageId)).length;
+      const myTasks = tasks.filter(t => (t.responsavelId || '') === p.id);
+      const concluidas = myTasks.filter(t => t.status === 'concluida' && inPeriod(t.concluidaAt || t.updatedAt, period)).length;
+      const pendentes = myTasks.filter(t => t.status === 'pendente' || t.status === 'em_andamento').length;
+      return { ...p, novos: novos.length, abertos, vendas: vendas.length, valor, ticket: vendas.length ? valor / vendas.length : 0, concluidas, pendentes };
+    }).filter(r => r.id || r.novos || r.abertos || r.vendas || r.pendentes);
+  }, [users, leads, tasks, stages, period.from, period.to]);
+
+  // Metas: sempre o mês atual
+  const today = dayKey(new Date());
+  const month = resolvePeriod('mes');
+  const daysInMonth = new Date(Number(today.slice(0, 4)), Number(today.slice(5, 7)), 0).getDate();
+  const dayOfMonth = Number(today.slice(8, 10));
+
+  const exportCurrent = () => {
+    const stamp = `${period.from}_a_${period.to}`;
+    if (subTab === 'vendas') {
+      downloadCsv(`funil_${stamp}.csv`, ['Etapa', 'Na etapa', 'Chegaram', '% do total'],
+        funnelRows.map(r => [r.nome, r.naEtapa, r.chegaram, Math.round(r.pct * 100)]));
+    } else if (subTab === 'consolidado') {
+      downloadCsv(`consolidado_${stamp}.csv`, ['Responsável', 'Leads novos', 'Em aberto', 'Vendas', 'Valor fechado', 'Ticket médio', 'Tarefas concluídas', 'Tarefas abertas'],
+        consolidated.map(r => [r.nome, r.novos, r.abertos, r.vendas, r.valor.toFixed(2), r.ticket.toFixed(2), r.concluidas, r.pendentes]));
+    } else if (subTab === 'origens') {
+      downloadCsv(`origens_${originTab}_${stamp}.csv`, ['Origem', 'Leads', 'Vendas', 'Valor fechado', 'Investimento'],
+        origins.map(r => [r.nome, r.leads, r.vendas, r.valor.toFixed(2), (invest[`${originTab}:${r.nome}`] || 0).toFixed(2)]));
+    } else if (subTab === 'atendimento') {
+      downloadCsv(`atendimento_${stamp}.csv`, ['Dia da semana', 'Conversas', '1ª resposta média (min)', 'Mediana (min)', '% na meta'],
+        byWeekday.map(r => [r.dia, r.total, r.media === undefined ? '' : Math.round(r.media / 60000), r.mediana === undefined ? '' : Math.round(r.mediana / 60000), r.dentroDaMeta === undefined ? '' : Math.round(r.dentroDaMeta * 100)]));
+    } else {
+      downloadCsv(`metas_${month.from}.csv`, ['Responsável', 'Meta do mês', 'Fechado no mês'],
+        users.map(u => [u.nome, u.metaMensal || 0, leads.filter(l => l.responsavelId === u.id && stages.get(l.stageId)?.tipo === 'ganho' && inPeriod(leadClosedDate(l), month)).reduce((a, l) => a + (l.valorFechado ?? l.valor ?? 0), 0).toFixed(2)]));
+    }
+  };
+
+  return (
+    <div className="flex-1 p-6 md:p-8 overflow-y-auto bg-slate-50 dark:bg-slate-950 flex flex-col">
+      <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mb-6">
+        <div>
+          <h2 className="text-xl font-bold text-slate-900 dark:text-slate-100">Estatísticas & Relatórios</h2>
+          <p className="text-xs text-slate-500">
+            {subTab === 'metas' ? `Mês atual: ${fmtDate(month.from)} a ${fmtDate(month.to)}` : `Período: ${fmtDate(period.from)} a ${fmtDate(period.to)}`}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <select value={periodId} onChange={(e) => setPeriodId(e.target.value as PeriodId)}
+            className="px-3 py-1.5 text-xs bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg text-slate-800 dark:text-slate-200 outline-none">
+            {PERIODS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+          </select>
+          {periodId === 'personalizado' && (
+            <>
+              <input type="date" value={custom.from} onChange={(e) => setCustom(c => ({ ...c, from: e.target.value }))}
+                className="px-2 py-1 text-xs bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg text-slate-800 dark:text-slate-200" />
+              <span className="text-xs text-slate-400">até</span>
+              <input type="date" value={custom.to} onChange={(e) => setCustom(c => ({ ...c, to: e.target.value }))}
+                className="px-2 py-1 text-xs bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg text-slate-800 dark:text-slate-200" />
+            </>
+          )}
+          <Button variant="outline" size="sm" onClick={exportCurrent} className="gap-2">
+            <Download className="w-4 h-4" /> Exportar CSV
+          </Button>
+        </div>
+      </div>
+
+      <Tabs
+        tabs={[
+          { id: 'vendas', label: 'Análise de Vendas & Funil' },
+          { id: 'consolidado', label: 'Relatório Consolidado' },
+          { id: 'origens', label: 'Origens & ROI' },
+          { id: 'metas', label: 'Metas & Equipe' },
+          { id: 'atendimento', label: 'Atendimento & Resposta' },
+        ]}
+        activeTab={subTab}
+        onChange={(id) => setSubTab(id as SubTab)}
+        className="mb-6"
+      />
+
+      {/* ---------------- Vendas e funil ---------------- */}
+      {subTab === 'vendas' && (
+        <div className="space-y-6">
+          <div className="grid grid-cols-2 xl:grid-cols-6 gap-4">
+            <Kpi label="Leads novos" value={String(vol.novos)} />
+            <Kpi label="Vendas" value={String(vol.vendas)} />
+            <Kpi label="Valor fechado" value={formatCurrency(vol.valorVendas)} tone="text-emerald-600 dark:text-emerald-400" />
+            <Kpi label="Ticket médio" value={vol.vendas ? formatCurrency(vol.ticketMedio) : '—'} />
+            <Kpi label="Conversão" value={vol.novos ? pct(vol.conversao) : '—'} sub="dos leads do período" />
+            <Kpi label="Ciclo de venda" value={days(cycle.media)} sub={cycle.vendas ? `mediana ${days(cycle.mediana)}` : 'entrada até o fechamento'} />
+          </div>
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+            <Box title="Funil do período" subtitle={`${pipeline?.nome || ''} · leads que entraram no período`} className="xl:col-span-2">
+              {vol.novos === 0 ? <Empty /> : (
+                <Table
+                  head={['Etapa', 'Na etapa', 'Chegaram até aqui', '% do total', 'Passagem da etapa anterior']}
+                  rows={funnelRows.map((r, i) => [
+                    <span className="flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: r.cor }} />{r.nome}</span>,
+                    r.naEtapa, r.chegaram, pct(r.pct),
+                    i === 0 ? '—' : pct(funnelRows[i - 1].chegaram ? r.chegaram / funnelRows[i - 1].chegaram : undefined),
+                  ])}
+                />
+              )}
+            </Box>
+            <Box title="Motivos de perda" subtitle="Leads perdidos no período">
+              {losses.length === 0 ? <Empty text="Nenhuma perda no período." /> : (
+                <Table head={['Motivo', 'Leads']} rows={losses.map(l => [l.motivo, l.total])} />
+              )}
+            </Box>
+          </div>
+        </div>
+      )}
+
+      {/* ---------------- Consolidado ---------------- */}
+      {subTab === 'consolidado' && (
+        <Box title="Desempenho por responsável" subtitle="Leads e vendas do período; tarefas abertas contam o momento atual">
+          {consolidated.length === 0 ? <Empty /> : (
+            <Table
+              head={['Responsável', 'Leads novos', 'Em aberto', 'Vendas', 'Valor fechado', 'Ticket médio', 'Tarefas concluídas', 'Tarefas abertas']}
+              rows={consolidated.map(r => [
+                <span className="font-semibold text-slate-900 dark:text-slate-100">{r.nome}</span>,
+                r.novos, r.abertos, r.vendas,
+                <span className="font-semibold text-emerald-600 dark:text-emerald-400">{formatCurrency(r.valor)}</span>,
+                r.vendas ? formatCurrency(r.ticket) : '—', r.concluidas, r.pendentes,
+              ])}
+            />
+          )}
+        </Box>
+      )}
+
+      {/* ---------------- Origens e ROI ---------------- */}
+      {subTab === 'origens' && (
+        <Box
+          title="Origens & ROI"
+          subtitle="Digite quanto foi investido em cada origem no período para calcular custo por lead, custo por venda e ROI"
+          right={
+            <div className="flex items-center bg-slate-100 dark:bg-slate-800 p-1 rounded-lg">
+              {([['canal', 'Canal'], ['campanha', 'Campanha'], ['anuncio', 'Anúncio']] as const).map(([id, label]) => (
+                <button key={id} type="button" onClick={() => setOriginTab(id)}
+                  className={cn('px-2.5 py-1 rounded-md text-[11px] font-medium', originTab === id ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-sm' : 'text-slate-500')}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          }
+        >
+          {origins.length === 0 ? <Empty /> : (
+            <Table
+              head={['Origem', 'Leads', 'Vendas', 'Conversão', 'Valor fechado', 'Investimento (R$)', 'Custo por lead', 'Custo por venda', 'ROI']}
+              rows={origins.map(r => {
+                const key = `${originTab}:${r.nome}`;
+                const inv = invest[key] || 0;
+                return [
+                  <span className="block max-w-[260px] truncate text-slate-900 dark:text-slate-100" title={r.nome}>{r.nome}</span>,
+                  r.leads, r.vendas, pct(r.leads ? r.vendas / r.leads : undefined),
+                  <span className="text-emerald-600 dark:text-emerald-400 font-semibold">{formatCurrency(r.valor)}</span>,
+                  <input
+                    type="number" min={0} step="0.01" value={inv || ''} placeholder="0,00"
+                    onChange={(e) => setInvestment(key, Math.max(0, Number(e.target.value) || 0))}
+                    className="w-24 px-2 py-1 text-xs text-right bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-md text-slate-800 dark:text-slate-200"
+                  />,
+                  inv && r.leads ? formatCurrency(inv / r.leads) : '—',
+                  inv && r.vendas ? formatCurrency(inv / r.vendas) : '—',
+                  inv ? <span className={r.valor >= inv ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}>{pct((r.valor - inv) / inv)}</span> : '—',
+                ];
+              })}
+            />
+          )}
+        </Box>
+      )}
+
+      {/* ---------------- Metas ---------------- */}
+      {subTab === 'metas' && (
+        <Box title="Metas do mês" subtitle="Valor fechado no mês atual contra a meta mensal. A projeção segue o ritmo dos dias já passados.">
+          <div className="space-y-5">
+            {users.map(u => {
+              const fechado = leads
+                .filter(l => l.responsavelId === u.id && stages.get(l.stageId)?.tipo === 'ganho' && inPeriod(leadClosedDate(l), month))
+                .reduce((a, l) => a + (l.valorFechado ?? l.valor ?? 0), 0);
+              const meta = u.metaMensal || 0;
+              const projecao = dayOfMonth ? (fechado / dayOfMonth) * daysInMonth : 0;
+              const isMe = u.id === currentUser.id;
+              return (
+                <div key={u.id}>
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5 text-xs">
+                    <span className="font-semibold text-slate-900 dark:text-slate-100">{u.nome}</span>
+                    <span className="flex items-center gap-2 text-slate-500">
+                      {formatCurrency(fechado)} de
+                      {isMe ? (
+                        <input type="number" min={0} defaultValue={meta || ''} placeholder="definir meta" key={meta}
+                          onBlur={(e) => {
+                            const v = Math.max(0, Number(e.target.value) || 0);
+                            if (v !== meta) updateCurrentUser({ metaMensal: v });
+                          }}
+                          onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+                          className="w-28 px-2 py-1 text-xs text-right bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-md text-slate-800 dark:text-slate-200" />
+                      ) : <span>{formatCurrency(meta)}</span>}
+                      · projeção {formatCurrency(projecao)}
+                    </span>
+                  </div>
+                  <div className="h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+                    <div className="h-full rounded-full bg-emerald-500" style={{ width: `${meta ? Math.min(100, Math.round((fechado / meta) * 100)) : 0}%` }} />
+                  </div>
+                  <p className="text-[11px] text-slate-500 mt-1">{meta ? `${pct(fechado / meta)} da meta` : 'Sem meta definida'}</p>
+                </div>
+              );
+            })}
+          </div>
+        </Box>
+      )}
+
+      {/* ---------------- Atendimento ---------------- */}
+      {subTab === 'atendimento' && (
+        <div className="space-y-6">
+          <Box
+            title="Tempo de resposta no WhatsApp"
+            subtitle="Tempo corrido (24 h). A espera começa na primeira mensagem do cliente sem resposta e termina na resposta da equipe (CRM ou celular). Vale o dia em que o cliente escreveu."
+            right={
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center bg-slate-100 dark:bg-slate-800 p-1 rounded-lg">
+                  {([['todos', 'Todos os dias'], ['semana', 'Seg a sex'], ['fim_de_semana', 'Fim de semana']] as const).map(([id, label]) => (
+                    <button key={id} type="button" onClick={() => setDayFilter(id)}
+                      className={cn('px-2.5 py-1 rounded-md text-[11px] font-medium', dayFilter === id ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-sm' : 'text-slate-500')}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <label className="flex items-center gap-1.5 text-[11px] text-slate-500">
+                  Meta
+                  <input type="number" min={1} value={goal}
+                    onChange={(e) => { const v = Math.max(1, Number(e.target.value) || 1); setGoal(v); localStorage.setItem(GOAL_KEY, String(v)); }}
+                    className="w-14 px-2 py-1 text-xs bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-800 dark:text-slate-200" />
+                  min
+                </label>
+              </div>
+            }
+          >
+            <div className="grid grid-cols-2 xl:grid-cols-5 gap-4">
+              <Kpi icon={<Timer className="w-3.5 h-3.5" />} label="1ª resposta (média)" value={formatDuration(resp.primeiraMedia)} sub={`mediana ${formatDuration(resp.primeiraMediana)} · antes ${formatDuration(respPrev.primeiraMedia)}`} />
+              <Kpi icon={<Clock className="w-3.5 h-3.5" />} label="Tempo de resposta (média)" value={formatDuration(resp.respostaMedia)} sub={`mediana ${formatDuration(resp.respostaMediana)} · ${resp.respostas} respostas`} />
+              <Kpi icon={<Target className="w-3.5 h-3.5" />} label={`Na meta (até ${goal} min)`} value={pct(resp.dentroDaMeta)}
+                tone={resp.dentroDaMeta === undefined ? undefined : resp.dentroDaMeta >= 0.8 ? 'text-emerald-600 dark:text-emerald-400' : resp.dentroDaMeta >= 0.5 ? 'text-amber-500' : 'text-red-500'}
+                sub={`antes ${pct(respPrev.dentroDaMeta)}`} />
+              <Kpi icon={<MessageSquare className="w-3.5 h-3.5" />} label="Conversas atendidas" value={String(resp.conversasAtendidas)} sub="com 1ª resposta no período" />
+              <Kpi icon={<AlertCircle className="w-3.5 h-3.5" />} label="Aguardando agora" value={String(waiting.length)}
+                tone={waiting.length ? 'text-amber-500' : undefined} sub={waiting[0] ? `mais antiga há ${formatDuration(waiting[0].ms)}` : 'ninguém esperando'} />
+            </div>
+          </Box>
+
+          <Box title="Segunda a sexta x fim de semana" subtitle="Mesmo período, separado pelo dia em que o cliente escreveu">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {([['Segunda a sexta', split.semana, <CalendarDays key="s" className="w-4 h-4" />], ['Fim de semana', split.fimDeSemana, <Sun key="f" className="w-4 h-4" />]] as const).map(([label, d, icon]) => (
+                <div key={label} className="p-4 rounded-xl border border-slate-200 dark:border-slate-800">
+                  <p className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5 mb-3">{icon}{label}</p>
+                  <div className="grid grid-cols-2 gap-3 text-xs">
+                    <div><p className="text-[11px] text-slate-500">1ª resposta média</p><p className="text-lg font-bold text-slate-900 dark:text-slate-100">{formatDuration(d.primeira.media)}</p></div>
+                    <div><p className="text-[11px] text-slate-500">Mediana</p><p className="text-lg font-bold text-slate-900 dark:text-slate-100">{formatDuration(d.primeira.mediana)}</p></div>
+                    <div><p className="text-[11px] text-slate-500">Resposta média (todas)</p><p className="font-semibold text-slate-800 dark:text-slate-200">{formatDuration(d.resposta.media)}</p></div>
+                    <div><p className="text-[11px] text-slate-500">Na meta · conversas</p><p className="font-semibold text-slate-800 dark:text-slate-200">{pct(d.primeira.dentroDaMeta)} · {d.primeira.total}</p></div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Box>
+
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+            <Box title="Faixas de tempo da 1ª resposta" subtitle="Quantas conversas foram respondidas em cada faixa">
+              {resp.conversasAtendidas === 0 ? <Empty /> : (
+                <div className="h-60">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={dist}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#94A3B833" vertical={false} />
+                      <XAxis dataKey="faixa" tick={tick} />
+                      <YAxis allowDecimals={false} tick={tick} width={32} />
+                      <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8 }} formatter={(v: any, _n: any, item: any) => [`${v} (${pct(item?.payload?.pct)})`, 'Conversas']} />
+                      <Bar dataKey="conversas" fill="#6366F1" radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </Box>
+            <Box title="1ª resposta por hora do dia" subtitle="Média em minutos, pela hora em que o cliente escreveu (horário de Brasília)">
+              {resp.conversasAtendidas === 0 ? <Empty /> : (
+                <div className="h-60">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={byHour}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#94A3B833" vertical={false} />
+                      <XAxis dataKey="hora" tick={tick} interval={2} />
+                      <YAxis tick={tick} width={40} />
+                      <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8 }} formatter={(v: any, _n: any, item: any) => [`${formatDuration(Number(v) * 60000)} (${item?.payload?.conversas || 0} conversas)`, '1ª resposta']} />
+                      <Bar dataKey="minutos" fill="#0EA5E9" radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </Box>
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+            <Box title="Por dia da semana" subtitle="1ª resposta, pelo dia em que o cliente escreveu">
+              <Table
+                head={['Dia', 'Conversas', 'Média', 'Mediana', `Na meta (${goal} min)`]}
+                rows={byWeekday.map(r => [r.dia, r.total, formatDuration(r.media), formatDuration(r.mediana), pct(r.dentroDaMeta)])}
+              />
+            </Box>
+            <Box title="Mensagens por dia" subtitle="Recebidas e enviadas no WhatsApp">
+              {msgVol.every(d => !d.recebidas && !d.enviadas) ? <Empty /> : (
+                <div className="h-60">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={msgVol}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#94A3B833" vertical={false} />
+                      <XAxis dataKey="dia" tick={tick} interval="preserveStartEnd" />
+                      <YAxis allowDecimals={false} tick={tick} width={36} />
+                      <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                      <Legend wrapperStyle={{ fontSize: 12 }} />
+                      <Bar dataKey="recebidas" name="Recebidas" fill="#94A3B8" radius={[4, 4, 0, 0]} />
+                      <Bar dataKey="enviadas" name="Enviadas" fill="#16A34A" radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </Box>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+===== FIM DO src/modules/estatisticas/EstatisticasPage.tsx =====
+
+----------------------------------------------------------------
+ALTERAÇÃO 3 — src/modules/transmissoes/TransmissoesPage.tsx (sem campanhas e envios fictícios):
+
+a) Substituir o bloco inteiro que começa em
+  const [campaigns, setCampaigns] = useState<any[]>([
+e termina no "]);" correspondente (a campanha de exemplo "Boas-vindas VIP") por:
+  // Sem campanhas de exemplo: os disparos reais de follow-up ainda serão construídos
+  const [campaigns, setCampaigns] = useState<any[]>([]);
+
+b) Dentro de handleCreateCampaign, apagar o comentário "// Simulate sending messages that land in chats" e o laço eligibleContacts.slice(0, 3).forEach(...) logo abaixo dele (o trecho que cria conversas e envia a mensagem "temos uma oferta especial").
+
+c) Dentro de handleCreateCampaign, trocar
+      lidas: Math.floor(eligibleContacts.length * 0.75),
+por
+      lidas: 0,
+
+d) Trocar
+          <h3 className="text-2xl font-bold text-green-600 mt-2">82.5%</h3>
+por
+          <h3 className="text-2xl font-bold text-slate-400 mt-2">—</h3>
+
+e) Substituir o botão do cabeçalho
+        <Button size="sm" onClick={() => setModalOpen(true)} className="gap-2">
+          <Plus className="w-4 h-4" /> Nova Campanha
+        </Button>
+      </div>
+por:
+        <Button size="sm" disabled title="Os disparos reais de follow-up pelo WhatsApp ainda serão construídos" className="gap-2">
+          <Plus className="w-4 h-4" /> Nova Campanha
+        </Button>
+      </div>
+
+      <div className="mb-6 p-4 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-xs text-amber-800 dark:text-amber-200">
+        Os envios em massa ainda não estão ativos. Eles entram na etapa dos disparos de follow-up, com envio real pelo WhatsApp e métricas de entrega e leitura.
+      </div>

@@ -12,6 +12,7 @@ import { Badge } from '../../components/ui/Badge';
 import { Avatar } from '../../components/ui/Avatar';
 import { Lead, LeadFilterState, Stage } from '../../types';
 import { ImportLeadsModal } from './ImportLeadsModal';
+import { confirmDialog } from '../../components/ui/ConfirmDialog';
 import { LeadFiltersPanel } from './LeadFiltersPanel';
 import { WonValueModal } from './WonValueModal';
 import { TagChip, TagMenu } from './TagPicker';
@@ -353,9 +354,13 @@ export const LeadsPage: React.FC = () => {
                                 type="button"
                                 title="Excluir lead"
                                 aria-label={`Excluir o lead ${lead.nome}`}
-                                onClick={(e) => {
+                                onClick={async (e) => {
                                   e.stopPropagation();
-                                  if (window.confirm(`Excluir o lead "${lead.nome}"?\n\nO lead sai do funil. O contato e as conversas continuam salvos.`)) {
+                                  const ok = await confirmDialog({
+                                    title: `Excluir o lead "${lead.nome}"?`,
+                                    message: 'O lead sai do funil. O contato e as conversas continuam salvos.',
+                                  });
+                                  if (ok) {
                                     deleteLead(lead.id);
                                     addToast('Lead excluído', `"${lead.nome}" foi removido do funil.`, 'success');
                                   }
@@ -570,8 +575,12 @@ export const LeadsPage: React.FC = () => {
             variant="outline"
             className="gap-1.5 text-red-600 hover:text-red-700"
             disabled={selectedIds.size === 0}
-            onClick={() => {
-              if (window.confirm(`Excluir ${selectedIds.size} leads?\n\nOs leads saem do funil. Contatos e conversas continuam salvos.`)) {
+            onClick={async () => {
+              const ok = await confirmDialog({
+                title: `Excluir ${selectedIds.size} ${selectedIds.size === 1 ? 'lead' : 'leads'}?`,
+                message: 'Os leads saem do funil. Contatos e conversas continuam salvos.',
+              });
+              if (ok) {
                 bulkDeleteLeads([...selectedIds]);
                 addToast('Leads excluídos', `${selectedIds.size} leads removidos do funil.`, 'success');
                 exitSelectMode();

@@ -81,6 +81,20 @@ export const db = {
     queueSync('tags', items);
   },
 
+  // Configurações gerais compartilhadas (ex.: marcador da limpeza dos dados de exemplo)
+  getSettings: (): Array<{ id: string; [key: string]: any }> => {
+    try {
+      const raw = localStorage.getItem('conversa_crm_settings_v1');
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  },
+  saveSettings: (items: Array<{ id: string; [key: string]: any }>) => {
+    localStorage.setItem('conversa_crm_settings_v1', JSON.stringify(items));
+    queueSync('settings', items);
+  },
+
   getSavedLeadFilters: (): SavedLeadFilter[] => {
     try {
       const raw = localStorage.getItem('conversa_crm_saved_lead_filters_v1');

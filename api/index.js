@@ -262,7 +262,8 @@ const ALLOWED_EMAILS = (process.env.CRM_ALLOWED_EMAILS || "").split(",").map((e)
 const PUBLIC_API = [
   /^\/api\/webhook\//,
   /^\/api\/wa\/diagnostics/,
-  /^\/api\/leads\/ingest/
+  /^\/api\/leads\/ingest/,
+  /^\/api\/disparos\//
 ];
 const tokenCache = /* @__PURE__ */ new Map();
 app.use("/api", async (req, res, next) => {
@@ -802,7 +803,8 @@ const CRM_ENTITIES = /* @__PURE__ */ new Set([
   "emailTemplates",
   "automationRules",
   "salesBots",
-  "savedFilters"
+  "savedFilters",
+  "settings"
 ]);
 const INGEST_SECRET = (process.env.CRM_INGEST_SECRET || EVOLUTION_WEBHOOK_SECRET || "").trim();
 function onlyDigits(v) {
@@ -1254,6 +1256,140 @@ app.post("/api/leads/ingest", async (req, res) => {
     return res.json({ ok: true, ...result, erros: result.erros.slice(0, 20) });
   } catch (err) {
     console.error("[Planilha ingest]", errorMessage(err));
+    return res.status(500).json({ error: errorMessage(err) });
+  }
+});
+const normTxt = (v) => v.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+const BLOCK_TAGS = ["nao enviar disparo", "nao enviar follow-up", "nao enviar follow up", "nao enviar mensagem"];
+function ingestAuthorized(req) {
+  const token = req.get("x-ingest-secret") || (typeof req.query.token === "string" ? req.query.token : "");
+  return Boolean(INGEST_SECRET) && token === INGEST_SECRET;
+}
+async function findByPhone(phoneRaw) {
+  const phone = brPhone(phoneRaw);
+  if (!phone) return null;
+  const sb = db();
+  const contacts = check(await sb.from("crm_records").select("id, data").eq("entity", "contacts").eq("deleted", false).eq("match_key", phone.key).limit(5), "buscar contato") || [];
+  const leads = [];
+  for (const c of contacts) {
+    const found = check(await sb.from("crm_records").select("id, data").eq("entity", "leads").eq("deleted", false).contains("data", { contactIds: [c.id] }).limit(5), "buscar lead") || [];
+    leads.push(...found.map((f) => f.data));
+  }
+  return { phone, contacts: contacts.map((c) => c.data), leads };
+}
+async function whatsappHistory(phone) {
+  const sb = db();
+  const ddd = phone.key.slice(2, 4);
+  const last8 = phone.key.slice(-8);
+  const convs = check(await sb.from("wa_conversations").select("id, phone").like("phone", `55${ddd}%${last8}`).limit(10), "buscar conversas") || [];
+  if (!convs.length) return { ultimaDoCliente: null, ultimaDaEquipe: null };
+  const ids = convs.map((c) => c.id);
+  const lastOf = async (fromMe) => {
+    const rows = check(await sb.from("wa_messages").select("enviada_at").in("conversation_id", ids).eq("from_me", fromMe).order("enviada_at", { ascending: false }).limit(1), "buscar mensagens") || [];
+    return rows[0]?.enviada_at || null;
+  };
+  return { ultimaDoCliente: await lastOf(false), ultimaDaEquipe: await lastOf(true) };
+}
+async function tagNamesById() {
+  const rows = check(await db().from("crm_records").select("id, data").eq("entity", "tags").eq("deleted", false), "ler etiquetas") || [];
+  return new Map(rows.map((r) => [r.id, String(r.data?.nome || "")]));
+}
+async function stagesById() {
+  const rows = check(await db().from("crm_records").select("data").eq("entity", "pipelines").eq("deleted", false), "ler funis") || [];
+  const m = /* @__PURE__ */ new Map();
+  rows.forEach((r) => (r.data?.stages || []).forEach((st) => m.set(st.id, st)));
+  return { map: m, first: rows.find((r) => r.data?.id === "pipe-vendas")?.data || rows[0]?.data || null };
+}
+const fmtBR = (iso) => new Date(iso).toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
+app.post("/api/disparos/verificar", async (req, res) => {
+  if (!ingestAuthorized(req)) return res.status(401).json({ error: "Segredo inválido (x-ingest-secret)." });
+  const { telefone, etapa = "primeira_mensagem" } = req.body || {};
+  const diasSemContato = Number(req.body?.diasSemContato ?? 3);
+  try {
+    const found = await findByPhone(telefone);
+    if (!found) return res.json({ enviar: false, motivo: "telefone inválido" });
+    const { map: stages } = await stagesById();
+    const tagNames = await tagNamesById();
+    for (const lead of found.leads) {
+      const tipo = stages.get(lead.stageId)?.tipo;
+      if (tipo === "ganho") return res.json({ enviar: false, motivo: "lead já é venda ganha", leadId: lead.id });
+      if (tipo === "perdido") return res.json({ enviar: false, motivo: "lead marcado como perdido", leadId: lead.id });
+      const nomes = (lead.tags || []).map((t) => normTxt(tagNames.get(t) || t));
+      if (nomes.some((n) => BLOCK_TAGS.includes(n))) return res.json({ enviar: false, motivo: "lead com etiqueta de não enviar", leadId: lead.id });
+      const ja = (lead.disparos || []).find((d) => d.etapa === etapa && d.status !== "erro");
+      if (ja) return res.json({ enviar: false, motivo: `já recebeu esta mensagem em ${fmtBR(ja.em)}`, leadId: lead.id });
+    }
+    const hist = await whatsappHistory(found.phone);
+    if (hist.ultimaDoCliente) {
+      return res.json({ enviar: false, motivo: `cliente já conversou pelo WhatsApp (última mensagem em ${fmtBR(hist.ultimaDoCliente)})`, leadId: found.leads[0]?.id || null });
+    }
+    if (hist.ultimaDaEquipe && Date.now() - new Date(hist.ultimaDaEquipe).getTime() < diasSemContato * 864e5) {
+      return res.json({ enviar: false, motivo: `a equipe falou com ele em ${fmtBR(hist.ultimaDaEquipe)}`, leadId: found.leads[0]?.id || null });
+    }
+    return res.json({ enviar: true, motivo: "ok", leadId: found.leads[0]?.id || null });
+  } catch (err) {
+    console.error("[Disparos verificar]", errorMessage(err));
+    return res.status(500).json({ enviar: false, motivo: "erro no CRM", error: errorMessage(err) });
+  }
+});
+app.post("/api/disparos/registrar", async (req, res) => {
+  if (!ingestAuthorized(req)) return res.status(401).json({ error: "Segredo inválido (x-ingest-secret)." });
+  const { telefone, nome, etapa = "primeira_mensagem", instancia, status = "enviado", erro } = req.body || {};
+  try {
+    const found = await findByPhone(telefone);
+    if (!found) return res.status(400).json({ error: "telefone inválido" });
+    const sb = db();
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const writes = [];
+    const put = (entity, data) => writes.push({ entity, id: data.id, data, deleted: false, updated_at: now, updated_by: "n8n", match_key: matchKeyFor(entity, data) });
+    const registro = { etapa, em: now, instancia: instancia || null, status: status === "erro" ? "erro" : "enviado", erro: erro ? String(erro).slice(0, 200) : void 0 };
+    let contact = found.contacts[0];
+    if (!contact) {
+      contact = {
+        id: `ct-${found.phone.key}`,
+        nome: nome || found.phone.display,
+        telefones: [found.phone.display],
+        emails: [],
+        tags: [],
+        customFields: {},
+        canais: { whatsapp: found.phone.e164 },
+        consentimentoMarketing: false,
+        createdAt: now,
+        updatedAt: now
+      };
+      put("contacts", contact);
+    }
+    let lead = found.leads[0];
+    if (lead) {
+      lead = { ...lead, disparos: [...lead.disparos || [], registro], updatedAt: now };
+    } else {
+      const { first } = await stagesById();
+      const entry = first?.stages?.find((st) => st.tipo === "entrada");
+      lead = {
+        id: `dp-${found.phone.key}`,
+        nome: nome || contact.nome,
+        valor: 0,
+        pipelineId: first?.id || "pipe-vendas",
+        stageId: entry?.id || "st-entrada",
+        responsavelId: "",
+        contactIds: [contact.id],
+        tags: [],
+        origemId: "",
+        customFields: {},
+        produtos: [],
+        createdAt: now,
+        updatedAt: now,
+        ultimaInteracaoAt: now,
+        naoLidas: 0,
+        rastreamento: { fonte: "Disparo do n8n" },
+        disparos: [registro]
+      };
+    }
+    put("leads", lead);
+    check(await sb.from("crm_records").upsert(writes, { onConflict: "entity,id" }), "registrar disparo");
+    return res.json({ ok: true, leadId: lead.id, criado: !found.leads[0] });
+  } catch (err) {
+    console.error("[Disparos registrar]", errorMessage(err));
     return res.status(500).json({ error: errorMessage(err) });
   }
 });

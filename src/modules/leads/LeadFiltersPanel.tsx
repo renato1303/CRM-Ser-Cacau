@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { Bookmark, Trash2, X } from 'lucide-react';
 import { Lead, LeadFilterState, SavedLeadFilter, Stage, Tag, User } from '../../types';
 import { Button } from '../../components/ui/Button';
+import { confirmDialog } from '../../components/ui/ConfirmDialog';
 import { EMPTY_LEAD_FILTER, SEM_RESPONSAVEL, countActiveFilters, filterOptions, toDateInput } from './leadFilters';
 
 interface Props {
@@ -89,7 +90,7 @@ export const LeadFiltersPanel: React.FC<Props> = ({
                     </button>
                     <button
                       type="button"
-                      onClick={() => { if (window.confirm(`Excluir o filtro salvo "${sf.nome}"?`)) onDeleteSaved(sf.id); }}
+                      onClick={async () => { if (await confirmDialog({ title: `Excluir o filtro salvo "${sf.nome}"?` })) onDeleteSaved(sf.id); }}
                       aria-label={`Excluir filtro ${sf.nome}`}
                       className="p-1 rounded text-slate-400 hover:text-red-500"
                     >

@@ -5,7 +5,7 @@
 export type SyncEntity =
   | 'users' | 'pipelines' | 'tags' | 'companies' | 'products' | 'contacts' | 'leads'
   | 'tasks' | 'notes' | 'activities' | 'messageTemplates' | 'emailTemplates'
-  | 'automationRules' | 'salesBots' | 'savedFilters';
+  | 'automationRules' | 'salesBots' | 'savedFilters' | 'settings';
 
 const KEYS: Record<SyncEntity, string> = {
   users: 'conversa_crm_users_v1',
@@ -23,6 +23,7 @@ const KEYS: Record<SyncEntity, string> = {
   automationRules: 'conversa_crm_auto_rules_v1',
   salesBots: 'conversa_crm_sales_bots_v1',
   savedFilters: 'conversa_crm_saved_lead_filters_v1',
+  settings: 'conversa_crm_settings_v1',
 };
 const ENTITIES = Object.keys(KEYS) as SyncEntity[];
 
@@ -180,12 +181,19 @@ function pushLocalOnly(serverKeys: Set<string>) {
 }
 
 let pulling = false;
+let lastPullOk = false;
+
+// true quando a última busca no servidor terminou sem erro
+export function lastPullSucceeded() {
+  return lastPullOk;
+}
 
 // Puxa as mudanças do servidor. Retorna true se algo mudou no navegador.
 export async function pullCrmChanges(): Promise<boolean> {
   if (pulling) return false;
   pulling = true;
   let changed = false;
+  let ok = false;
   try {
     const firstSync = !localStorage.getItem(SINCE_KEY);
     let since = localStorage.getItem(SINCE_KEY) || EPOCH;
@@ -201,6 +209,7 @@ export async function pullCrmChanges(): Promise<boolean> {
       if (applyRecords(records)) changed = true;
       if (feed.nextSince) { since = feed.nextSince; localStorage.setItem(SINCE_KEY, since); }
       if (!feed.hasMore) {
+        ok = true;
         if (firstSync && syncAvailable) {
           if (!localStorage.getItem(SINCE_KEY)) localStorage.setItem(SINCE_KEY, EPOCH);
           pushLocalOnly(serverKeys);
@@ -212,6 +221,7 @@ export async function pullCrmChanges(): Promise<boolean> {
     console.warn('[Sincronização] falha ao buscar mudanças:', err);
   } finally {
     pulling = false;
+    lastPullOk = ok;
   }
   return changed;
 }

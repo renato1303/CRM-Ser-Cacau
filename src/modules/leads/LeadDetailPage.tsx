@@ -333,6 +333,22 @@ export const LeadDetailPage: React.FC<LeadDetailPageProps> = ({ leadId }) => {
                 </div>
               </div>
               <div>
+                <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Disparos do n8n</h4>
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-800">
+                  {(lead.disparos || []).length === 0 ? (
+                    <p className="text-slate-400 py-1">Nenhum disparo registrado.</p>
+                  ) : (
+                    [...(lead.disparos || [])].reverse().map((d, i) => (
+                      <Row
+                        key={`${d.etapa}-${d.em}-${i}`}
+                        label={d.etapa.replace(/_/g, ' ')}
+                        value={<span className={d.status === 'erro' ? 'text-red-500' : ''}>{formatDate(d.em)}{d.instancia ? ` · ${d.instancia}` : ''}{d.status === 'erro' ? ' · erro' : ''}</span>}
+                      />
+                    ))
+                  )}
+                </div>
+              </div>
+              <div>
                 <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Atendimento</h4>
                 <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-800">
                   <Row label="Última interação" value={formatDate(lead.ultimaInteracaoAt)} />

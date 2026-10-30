@@ -56,70 +56,15 @@ export const initialRoles: Role[] = [
 export const initialUsers: User[] = [
   {
     id: 'user-master',
-    nome: 'Renato Inácio (Master)',
+    nome: 'Comercial Será Cacau',
     email: 'renatoinacio2@gmail.com',
-    avatar: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=150',
-    telefone: '+55 (11) 99999-9999',
+    avatar: '',
+    telefone: '',
     roleId: 'role-admin',
     teamId: 'team-1',
     ativo: true,
-    metaMensal: 150000,
+    metaMensal: 0,
   },
-  {
-    id: 'user-1',
-    nome: 'Carlos Mendes',
-    email: 'carlos@conversacrm.io',
-    avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150',
-    telefone: '+55 (11) 98765-4321',
-    roleId: 'role-admin',
-    teamId: 'team-1',
-    ativo: true,
-    metaMensal: 85000,
-  },
-  {
-    id: 'user-2',
-    nome: 'Mariana Souza',
-    email: 'mariana@conversacrm.io',
-    avatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=150',
-    telefone: '+55 (11) 98123-4567',
-    roleId: 'role-manager',
-    teamId: 'team-1',
-    ativo: true,
-    metaMensal: 60000,
-  },
-  {
-    id: 'user-3',
-    nome: 'Lucas Ribeiro',
-    email: 'lucas@conversacrm.io',
-    avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150',
-    telefone: '+55 (11) 97234-5678',
-    roleId: 'role-agent',
-    teamId: 'team-1',
-    ativo: true,
-    metaMensal: 45000,
-  },
-  {
-    id: 'user-4',
-    nome: 'Beatriz Lima',
-    email: 'beatriz@conversacrm.io',
-    avatar: 'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=150',
-    telefone: '+55 (21) 99345-6789',
-    roleId: 'role-agent',
-    teamId: 'team-2',
-    ativo: true,
-    metaMensal: 40000,
-  },
-  {
-    id: 'user-5',
-    nome: 'Rafael Costa',
-    email: 'rafael@conversacrm.io',
-    avatar: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=150',
-    telefone: '+55 (31) 98456-7890',
-    roleId: 'role-agent',
-    teamId: 'team-2',
-    ativo: true,
-    metaMensal: 40000,
-  }
 ];
 
 export const initialPipelines: Pipeline[] = [
@@ -339,44 +284,8 @@ export const initialLeads: Lead[] = [
   }
 ];
 
-export const initialTasks: Task[] = [
-  {
-    id: 'task-1',
-    tipo: 'reuniao',
-    texto: 'Apresentar proposta final e contrato para diretoria da TechVibe',
-    prazo: new Date(Date.now() + 3600000 * 2).toISOString(), // em 2 horas (hoje)
-    responsavelId: 'user-1',
-    entidadeTipo: 'lead',
-    entidadeId: 'lead-1',
-    status: 'pendente',
-    prioridade: 'normal',
-    createdAt: '2026-03-15T10:00:00Z',
-  },
-  {
-    id: 'task-2',
-    tipo: 'ligar',
-    texto: 'Ligar para Roberto para confirmar recebimento da proposta comercial',
-    prazo: new Date(Date.now() - 3600000 * 4).toISOString(), // atrasada
-    responsavelId: 'user-2',
-    entidadeTipo: 'lead',
-    entidadeId: 'lead-2',
-    status: 'pendente',
-    prioridade: 'normal',
-    createdAt: '2026-03-14T09:00:00Z',
-  },
-  {
-    id: 'task-3',
-    tipo: 'follow-up',
-    texto: 'Enviar materiais adicionais sobre integração via API',
-    prazo: new Date(Date.now() + 86400000 * 2).toISOString(), // futuro
-    responsavelId: 'user-1',
-    entidadeTipo: 'lead',
-    entidadeId: 'lead-3',
-    status: 'pendente',
-    prioridade: 'normal',
-    createdAt: '2026-03-16T11:00:00Z',
-  }
-];
+// Sem tarefas de exemplo: a lista começa vazia
+export const initialTasks: Task[] = [];
 
 export const initialNotes: Note[] = [
   {

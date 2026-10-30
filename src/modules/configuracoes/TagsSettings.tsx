@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { Plus, Trash2, Tag as TagIcon } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { Button } from '../../components/ui/Button';
+import { confirmDialog } from '../../components/ui/ConfirmDialog';
 import { TAG_COLORS, TagChip } from '../leads/TagPicker';
 
 // Configurações > Etiquetas: criar, renomear, trocar a cor e excluir
@@ -133,11 +134,12 @@ export const TagsSettings: React.FC = () => {
 
                 <button
                   type="button"
-                  onClick={() => {
-                    const msg = total > 0
-                      ? `Excluir a etiqueta "${t.nome}"?\n\nEla será removida de ${total} ${total === 1 ? 'lead' : 'leads'}.`
-                      : `Excluir a etiqueta "${t.nome}"?`;
-                    if (window.confirm(msg)) {
+                  onClick={async () => {
+                    const ok = await confirmDialog({
+                      title: `Excluir a etiqueta "${t.nome}"?`,
+                      message: total > 0 ? `Ela será removida de ${total} ${total === 1 ? 'lead' : 'leads'}.` : undefined,
+                    });
+                    if (ok) {
                       deleteTag(t.id);
                       addToast('Etiqueta excluída', t.nome, 'success');
                     }

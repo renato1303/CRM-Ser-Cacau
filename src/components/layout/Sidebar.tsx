@@ -23,6 +23,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ onOpenLoginModal }) => {
     { id: 'painel', label: 'Painel', icon: LayoutDashboard },
     { id: 'leads', label: 'Leads', icon: Users },
     { id: 'chats', label: 'Chats', icon: MessageSquare, badge: unreadChatsCount > 0 ? unreadChatsCount : undefined },
+    { id: 'agenda', label: 'Tarefas', icon: Calendar, badge: overdueTasksCount > 0 ? overdueTasksCount : undefined },
     { id: 'listas/contatos', label: 'Listas', icon: ListTree },
     { id: 'email', label: 'E-mail', icon: Mail },
     { id: 'estatisticas', label: 'Estatísticas', icon: BarChart3 },

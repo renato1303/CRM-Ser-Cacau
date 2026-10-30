@@ -5,6 +5,7 @@ import {
 } from '../types';
 import { db } from '../services/db/storage';
 import { pullCrmChanges } from '../services/db/sync';
+import { cleanupDemoDataOnce } from '../services/db/cleanup';
 import { supabaseService, supabase } from '../services/db/supabase';
 
 interface CRMState {
@@ -416,6 +417,7 @@ export const useStore = create<CRMState>((set, get) => ({
 
   refreshData: async () => {
     await pullCrmChanges();
+    cleanupDemoDataOnce();
     try {
       const hasWaConversations = db.getConversations().some(c => c.id.startsWith('wa:'));
       let since = hasWaConversations ? (localStorage.getItem(WA_FEED_SINCE_KEY) || WA_EPOCH) : WA_EPOCH;
@@ -435,6 +437,7 @@ export const useStore = create<CRMState>((set, get) => ({
     }
 
     set({
+      currentUser: db.getCurrentUser(),
       users: db.getUsers(),
       pipelines: db.getPipelines(),
       tags: db.getTags(),
