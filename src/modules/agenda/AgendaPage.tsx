@@ -13,6 +13,8 @@ import { Tabs } from '../../components/ui/Tabs';
 import { Badge } from '../../components/ui/Badge';
 import { Avatar } from '../../components/ui/Avatar';
 import { Task, TaskChecklistItem } from '../../types';
+import { CalendarView } from './CalendarView';
+import { googleConnect, toLocalInput } from '../../services/googleCalendar';
 
 export const AgendaPage: React.FC = () => {
   const { 
@@ -58,13 +60,16 @@ export const AgendaPage: React.FC = () => {
   // Form task state
   const [formTexto, setFormTexto] = useState('');
   const [formTipo, setFormTipo] = useState(taskTypes[0]?.id || 'ligar');
-  const [formPrazo, setFormPrazo] = useState(new Date().toISOString().slice(0, 16));
+  const [formPrazo, setFormPrazo] = useState(toLocalInput());
   const [formResponsavelId, setFormResponsavelId] = useState(currentUser.id);
   const [formPrioridade, setFormPrioridade] = useState<'baixa' | 'normal' | 'alta' | 'urgente'>('normal');
   const [formEntidadeTipo, setFormEntidadeTipo] = useState<'lead' | 'contact' | 'company'>('lead');
   const [formEntidadeId, setFormEntidadeId] = useState(leads[0]?.id || '');
   const [formChecklist, setFormChecklist] = useState<TaskChecklistItem[]>([]);
   const [formObservacoes, setFormObservacoes] = useState('');
+  const [formDuracao, setFormDuracao] = useState(30);
+  const [formLembrete, setFormLembrete] = useState<string>('15_min');
+  const [leadQuery, setLeadQuery] = useState('');
 
   // Counters
   const now = Date.now();
@@ -99,13 +104,16 @@ export const AgendaPage: React.FC = () => {
     setEditingTask(null);
     setFormTexto('');
     setFormTipo(taskTypes[0]?.id || 'ligar');
-    setFormPrazo(defaultDate || new Date().toISOString().slice(0, 16));
+    setFormPrazo(defaultDate || toLocalInput());
     setFormResponsavelId(currentUser.id);
     setFormPrioridade('normal');
     setFormEntidadeTipo('lead');
-    setFormEntidadeId(leads[0]?.id || '');
+    setFormEntidadeId('');
     setFormChecklist([]);
     setFormObservacoes('');
+    setFormDuracao(30);
+    setFormLembrete('15_min');
+    setLeadQuery('');
     setTaskModalOpen(true);
   };
 
@@ -113,13 +121,16 @@ export const AgendaPage: React.FC = () => {
     setEditingTask(task);
     setFormTexto(task.texto);
     setFormTipo(task.tipo);
-    setFormPrazo(task.prazo ? new Date(task.prazo).toISOString().slice(0, 16) : new Date().toISOString().slice(0, 16));
+    setFormPrazo(task.prazo ? toLocalInput(task.prazo) : toLocalInput());
     setFormResponsavelId(task.responsavelId);
     setFormPrioridade(task.prioridade || 'normal');
     setFormEntidadeTipo(task.entidadeTipo || 'lead');
     setFormEntidadeId(task.entidadeId || '');
     setFormChecklist(task.checklist || []);
     setFormObservacoes(task.observacoes || '');
+    setFormDuracao(task.duracao || 30);
+    setFormLembrete(task.lembrete || 'nenhum');
+    setLeadQuery('');
     setTaskModalOpen(true);
   };
 
@@ -134,10 +145,12 @@ export const AgendaPage: React.FC = () => {
         prazo: new Date(formPrazo).toISOString(),
         responsavelId: formResponsavelId,
         prioridade: formPrioridade,
-        entidadeTipo: formEntidadeTipo,
-        entidadeId: formEntidadeId,
+        entidadeTipo: formEntidadeId ? formEntidadeTipo : undefined,
+        entidadeId: formEntidadeId || undefined,
         checklist: formChecklist,
         observacoes: formObservacoes,
+        duracao: formDuracao,
+        lembrete: formLembrete as Task['lembrete'],
       });
       addToast('Tarefa Atualizada', 'As alterações foram salvas com sucesso.', 'success');
     } else {
@@ -147,11 +160,13 @@ export const AgendaPage: React.FC = () => {
         prazo: new Date(formPrazo).toISOString(),
         responsavelId: formResponsavelId,
         prioridade: formPrioridade,
-        entidadeTipo: formEntidadeTipo,
-        entidadeId: formEntidadeId,
+        entidadeTipo: formEntidadeId ? formEntidadeTipo : undefined,
+        entidadeId: formEntidadeId || undefined,
         status: 'pendente',
         checklist: formChecklist,
         observacoes: formObservacoes,
+        duracao: formDuracao,
+        lembrete: formLembrete as Task['lembrete'],
       });
       addToast('Tarefa Criada', 'Nova tarefa adicionada com sucesso.', 'success');
     }
@@ -263,15 +278,6 @@ export const AgendaPage: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-3 flex-wrap">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => window.open(`#/agendar/${currentUser.id}`, '_blank')}
-            className="gap-2 text-indigo-400 border-indigo-800 hover:bg-indigo-950/50"
-          >
-            <Share2 className="w-4 h-4" /> Link de Agendamento
-          </Button>
-
           <Button
             variant="outline"
             size="sm"
@@ -665,12 +671,12 @@ export const AgendaPage: React.FC = () => {
 
       {/* ================= VIEW: CALENDÁRIO ================= */}
       {view === 'calendario' && (
-        <div className="bg-slate-900 rounded-2xl border border-slate-800 p-6 flex-1 shadow-sm flex flex-col items-center justify-center text-center space-y-4">
-          <CalendarDays className="w-16 h-16 text-indigo-500 animate-pulse" />
-          <h3 className="text-base font-bold text-white">Visualização de Calendário Mensal</h3>
-          <p className="text-xs text-slate-400 max-w-md">Gerencie todos os compromissos em grade mensal interativa. Alterne para a Visão Lista ou Quadro para ações rápidas de arrastar e soltar.</p>
-          <Button onClick={() => setView('lista')} size="sm">Voltar para Visão Lista</Button>
-        </div>
+        <CalendarView
+          tasks={filteredTasks}
+          onOpenTask={(task) => setSelectedTaskForDetail(task)}
+          onNewTask={(localDateTime) => handleOpenCreateModal(localDateTime)}
+          onConnectGoogle={() => { googleConnect().catch(err => addToast('Google Agenda', err.message, 'error')); }}
+        />
       )}
 
       {/* ================= MODAL: CRIAR / EDITAR TAREFA ================= */}
@@ -748,17 +754,96 @@ export const AgendaPage: React.FC = () => {
             </div>
           </div>
 
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1">Duração</label>
+              <select
+                value={formDuracao}
+                onChange={(e) => setFormDuracao(Number(e.target.value))}
+                className="w-full px-3 py-2.5 text-xs bg-slate-800 border border-slate-700 rounded-xl text-slate-100 outline-none"
+              >
+                {[15, 30, 45, 60, 90, 120].map(m => (
+                  <option key={m} value={m}>{m < 60 ? `${m} minutos` : m === 60 ? '1 hora' : m === 90 ? '1 hora e meia' : '2 horas'}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1">Lembrete</label>
+              <select
+                value={formLembrete}
+                onChange={(e) => setFormLembrete(e.target.value)}
+                className="w-full px-3 py-2.5 text-xs bg-slate-800 border border-slate-700 rounded-xl text-slate-100 outline-none"
+              >
+                <option value="nenhum">Sem lembrete</option>
+                <option value="no_horario">No horário</option>
+                <option value="15_min">15 minutos antes</option>
+                <option value="1_hora">1 hora antes</option>
+                <option value="1_dia">1 dia antes</option>
+              </select>
+            </div>
+          </div>
+
           <div>
-            <label className="block text-xs font-semibold text-slate-300 mb-1">Vincular com Lead</label>
-            <select
-              value={formEntidadeId}
-              onChange={(e) => setFormEntidadeId(e.target.value)}
-              className="w-full px-3 py-2.5 text-xs bg-slate-800 border border-slate-700 rounded-xl text-slate-100 outline-none"
-            >
-              {leads.map(l => (
-                <option key={l.id} value={l.id}>{l.nome}</option>
-              ))}
-            </select>
+            <label className="block text-xs font-semibold text-slate-300 mb-1">Vincular com Lead (opcional)</label>
+            {formEntidadeId ? (
+              <div className="flex items-center justify-between gap-2 px-3 py-2.5 bg-slate-800 border border-slate-700 rounded-xl">
+                <span className="text-xs text-slate-100 truncate">{leads.find(l => l.id === formEntidadeId)?.nome || 'Lead removido'}</span>
+                <button type="button" onClick={() => setFormEntidadeId('')} className="text-[11px] text-slate-400 hover:text-red-400 flex items-center gap-1">
+                  <X className="w-3.5 h-3.5" /> Remover
+                </button>
+              </div>
+            ) : (
+              <div className="relative">
+                <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+                <input
+                  type="text"
+                  value={leadQuery}
+                  onChange={(e) => setLeadQuery(e.target.value)}
+                  placeholder="Buscar lead por nome, empresa ou telefone..."
+                  className="w-full pl-9 pr-3 py-2.5 text-xs bg-slate-800 border border-slate-700 rounded-xl text-slate-100 outline-none focus:border-indigo-500"
+                />
+                {leadQuery.trim().length >= 2 && (() => {
+                  const q = leadQuery.trim().toLowerCase();
+                  const digits = q.replace(/\D/g, '');
+                  const results = leads.filter(l => {
+                    if (l.nome.toLowerCase().includes(q)) return true;
+                    return l.contactIds.some(cid => {
+                      const c = contacts.find(ct => ct.id === cid);
+                      if (!c) return false;
+                      if (c.nome.toLowerCase().includes(q)) return true;
+                      return digits.length >= 4 && (c.telefones || []).some(t => t.replace(/\D/g, '').includes(digits));
+                    });
+                  }).slice(0, 8);
+                  return (
+                    <div className="absolute z-30 mt-1 w-full max-h-56 overflow-y-auto rounded-xl bg-slate-800 border border-slate-700 shadow-xl">
+                      {results.length === 0 ? (
+                        <p className="px-3 py-2 text-xs text-slate-400">Nenhum lead encontrado.</p>
+                      ) : results.map(l => (
+                        <button
+                          key={l.id}
+                          type="button"
+                          onClick={() => { setFormEntidadeTipo('lead'); setFormEntidadeId(l.id); setLeadQuery(''); }}
+                          className="w-full text-left px-3 py-2 text-xs text-slate-100 hover:bg-slate-700"
+                        >
+                          {l.nome}
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1">Observações (opcional)</label>
+            <textarea
+              value={formObservacoes}
+              onChange={(e) => setFormObservacoes(e.target.value)}
+              rows={3}
+              placeholder="Detalhes da reunião, pauta, endereço ou link da chamada..."
+              className="w-full px-3 py-2.5 text-xs bg-slate-800 border border-slate-700 rounded-xl text-slate-100 outline-none focus:border-indigo-500 resize-none"
+            />
           </div>
 
           <div className="flex justify-end gap-2 pt-4 border-t border-slate-800">

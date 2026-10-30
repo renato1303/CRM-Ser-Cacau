@@ -7,6 +7,7 @@ import { useStore } from '../../store/useStore';
 import { TagPicker } from './TagPicker';
 import { WonValueModal } from './WonValueModal';
 import { leadProductsTotal } from './leadFilters';
+import { toLocalInput } from '../../services/googleCalendar';
 import { formatCurrency, formatDate } from '../../utils/cn';
 import { Button } from '../../components/ui/Button';
 import { Tabs } from '../../components/ui/Tabs';
@@ -22,8 +23,17 @@ export const LeadDetailPage: React.FC<LeadDetailPageProps> = ({ leadId }) => {
   const { 
     leads, contacts, companies, users, pipelines, notes, tasks, 
     messages, conversations, setActiveModule, updateLead, addNote, addTask, sendMessage, addContact,
-    tags, addTag, setLeadTags, moveLeadStage, winLead, addToast
+    tags, addTag, setLeadTags, moveLeadStage, winLead, addToast, taskTypes
   } = useStore();
+  // Tarefa criada pelo card: tipo, data/hora, duração e lembrete
+  const [taskTipo, setTaskTipo] = useState(() => taskTypes.find(t => /reuni/i.test(t.id) || /reuni/i.test(t.nome))?.id || taskTypes[0]?.id || 'reuniao');
+  const [taskQuando, setTaskQuando] = useState(() => {
+    const d = new Date(Date.now() + 86400000);
+    d.setHours(10, 0, 0, 0);
+    return toLocalInput(d);
+  });
+  const [taskDuracao, setTaskDuracao] = useState(30);
+  const [taskLembrete, setTaskLembrete] = useState('15_min');
   const [wonStageId, setWonStageId] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState<'negociado' | 'fechado' | null>(null);
   const [valueInput, setValueInput] = useState('');
@@ -77,10 +87,14 @@ export const LeadDetailPage: React.FC<LeadDetailPageProps> = ({ leadId }) => {
 
   const handleAddTask = () => {
     if (!composerText.trim()) return;
+    const quando = new Date(taskQuando);
+    if (Number.isNaN(quando.getTime())) { addToast('Data inválida', 'Escolha a data e a hora da tarefa.', 'error'); return; }
     addTask({
-      tipo: 'follow-up',
+      tipo: taskTipo,
       texto: composerText,
-      prazo: new Date(Date.now() + 86400000).toISOString(),
+      prazo: quando.toISOString(),
+      duracao: taskDuracao,
+      lembrete: taskLembrete as any,
       responsavelId: responsable?.id || users[0].id,
       entidadeTipo: 'lead',
       entidadeId: lead.id,
@@ -472,6 +486,31 @@ export const LeadDetailPage: React.FC<LeadDetailPageProps> = ({ leadId }) => {
               </button>
             ))}
           </div>
+
+          {composerMode === 'tarefa' && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-2">
+              <select value={taskTipo} onChange={(e) => setTaskTipo(e.target.value)} aria-label="Tipo de tarefa"
+                className="px-2 py-1.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-slate-100 outline-none">
+                {(taskTypes.length ? taskTypes : [{ id: 'reuniao', nome: 'Reunião' }, { id: 'ligar', nome: 'Ligar' }]).map(t => (
+                  <option key={t.id} value={t.id}>{t.nome}</option>
+                ))}
+              </select>
+              <input type="datetime-local" value={taskQuando} onChange={(e) => setTaskQuando(e.target.value)} aria-label="Data e hora"
+                className="px-2 py-1.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-slate-100 outline-none" />
+              <select value={taskDuracao} onChange={(e) => setTaskDuracao(Number(e.target.value))} aria-label="Duração"
+                className="px-2 py-1.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-slate-100 outline-none">
+                {[15, 30, 45, 60, 90, 120].map(m => <option key={m} value={m}>{m < 60 ? `${m} min` : m === 60 ? '1 h' : m === 90 ? '1 h 30' : '2 h'}</option>)}
+              </select>
+              <select value={taskLembrete} onChange={(e) => setTaskLembrete(e.target.value)} aria-label="Lembrete"
+                className="px-2 py-1.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-slate-100 outline-none">
+                <option value="nenhum">Sem lembrete</option>
+                <option value="no_horario">Lembrar no horário</option>
+                <option value="15_min">15 min antes</option>
+                <option value="1_hora">1 h antes</option>
+                <option value="1_dia">1 dia antes</option>
+              </select>
+            </div>
+          )}
 
           <div className="flex items-end gap-2">
             <textarea

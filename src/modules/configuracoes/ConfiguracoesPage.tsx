@@ -6,6 +6,7 @@ import { Tabs } from '../../components/ui/Tabs';
 import { Modal } from '../../components/ui/Modal';
 import { db } from '../../services/db/storage';
 import { TagsSettings } from './TagsSettings';
+import { IntegracoesSettings } from './IntegracoesSettings';
 
 export const ConfiguracoesPage: React.FC = () => {
   const { 
@@ -13,7 +14,9 @@ export const ConfiguracoesPage: React.FC = () => {
     emailTemplates, addEmailTemplate, deleteEmailTemplate, 
     restoreSeed, clearAllData, clearAllDataCompletely, tags 
   } = useStore();
-  const [tab, setTab] = useState<'etiquetas' | 'templates' | 'email_templates'>('etiquetas');
+  const [tab, setTab] = useState<'etiquetas' | 'integracoes' | 'templates' | 'email_templates'>(
+    () => (new URLSearchParams(window.location.search).get('google') ? 'integracoes' : 'etiquetas')
+  );
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   
   // New template modal
@@ -72,6 +75,7 @@ export const ConfiguracoesPage: React.FC = () => {
       <Tabs
         tabs={[
           { id: 'etiquetas', label: 'Etiquetas', badge: tags.length },
+          { id: 'integracoes', label: 'Integrações' },
           { id: 'templates', label: 'Modelos de Mensagem', badge: messageTemplates.length },
           { id: 'email_templates', label: 'Modelos de E-mail', badge: emailTemplates.length },
         ]}
@@ -81,6 +85,8 @@ export const ConfiguracoesPage: React.FC = () => {
       />
 
       {tab === 'etiquetas' && <TagsSettings />}
+
+      {tab === 'integracoes' && <IntegracoesSettings />}
 
       {tab === 'templates' && (
         <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm p-6 flex flex-col flex-1">

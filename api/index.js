@@ -1,6 +1,7 @@
 // API do CRM (Express). Na Vercel roda como função serverless; no AI Studio é carregada pelo server.ts.
 // Não coloque dados simulados aqui.
 import express from "express";
+import crypto from "crypto";
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 dotenv.config();
@@ -263,7 +264,8 @@ const PUBLIC_API = [
   /^\/api\/webhook\//,
   /^\/api\/wa\/diagnostics/,
   /^\/api\/leads\/ingest/,
-  /^\/api\/disparos\//
+  /^\/api\/disparos\//,
+  /^\/api\/google\/callback/
 ];
 const tokenCache = /* @__PURE__ */ new Map();
 app.use("/api", async (req, res, next) => {
@@ -851,6 +853,267 @@ async function fetchAllAtTime(table, columns, updatedAt, orderCols) {
   }
   return all;
 }
+const GOOGLE_CLIENT_ID = (process.env.GOOGLE_CLIENT_ID || "").trim();
+const GOOGLE_CLIENT_SECRET = (process.env.GOOGLE_CLIENT_SECRET || "").trim();
+const GOOGLE_SCOPES = "openid email https://www.googleapis.com/auth/calendar.events";
+const GCAL = "https://www.googleapis.com/calendar/v3/calendars";
+const TASK_TYPE_LABEL = {
+  ligar: "Ligar",
+  reuniao: "Reunião",
+  follow: "Follow-up",
+  "follow-up": "Follow-up",
+  follow_up: "Follow-up",
+  followup: "Follow-up",
+  email: "E-mail",
+  visita: "Visita",
+  whatsapp: "WhatsApp",
+  outro: "Tarefa"
+};
+const REMINDER_MIN = { no_horario: 0, "15_min": 15, "1_hora": 60, "1_dia": 1440 };
+const AGENDA_FIELDS = ["texto", "prazo", "duracao", "status", "tipo", "descricao", "observacoes", "lembrete", "entidadeId"];
+const googleConfigured = () => Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && PUBLIC_BASE_URL);
+const googleRedirectUri = () => `${PUBLIC_BASE_URL}/api/google/callback`;
+function signState(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const sig = crypto.createHmac("sha256", GOOGLE_CLIENT_SECRET).update(body).digest("base64url");
+  return `${body}.${sig}`;
+}
+function readState(state) {
+  const [body, sig] = String(state || "").split(".");
+  if (!body || !sig) return null;
+  const expected = crypto.createHmac("sha256", GOOGLE_CLIENT_SECRET).update(body).digest("base64url");
+  if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+  try {
+    return JSON.parse(Buffer.from(body, "base64url").toString());
+  } catch {
+    return null;
+  }
+}
+async function googleToken(params) {
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ client_id: GOOGLE_CLIENT_ID, client_secret: GOOGLE_CLIENT_SECRET, ...params }).toString()
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error_description || data.error || `Google respondeu ${res.status}`);
+  return data;
+}
+async function googleAccessToken(crmEmail) {
+  if (!crmEmail || !googleConfigured()) return null;
+  const sb = db();
+  const row = check(await sb.from("google_tokens").select("*").eq("crm_email", crmEmail.toLowerCase()).maybeSingle(), "ler conexão do Google");
+  if (!row?.refresh_token) return null;
+  if (row.access_token && row.expires_at && new Date(row.expires_at).getTime() > Date.now() + 6e4) {
+    return { token: row.access_token, calendarId: row.calendar_id || "primary" };
+  }
+  try {
+    const t = await googleToken({ grant_type: "refresh_token", refresh_token: row.refresh_token });
+    const expires = new Date(Date.now() + (Number(t.expires_in) || 3600) * 1e3).toISOString();
+    check(await sb.from("google_tokens").update({ access_token: t.access_token, expires_at: expires, last_error: null, updated_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("crm_email", row.crm_email), "renovar token do Google");
+    return { token: t.access_token, calendarId: row.calendar_id || "primary" };
+  } catch (err) {
+    await sb.from("google_tokens").update({ last_error: errorMessage(err), updated_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("crm_email", row.crm_email);
+    console.warn(`[Google Agenda] não foi possível renovar o acesso de ${row.crm_email}:`, errorMessage(err));
+    return null;
+  }
+}
+async function gcal(token, method, url, body) {
+  const res = await fetch(url, {
+    method,
+    headers: { Authorization: `Bearer ${token}`, ...body ? { "Content-Type": "application/json" } : {} },
+    body: body ? JSON.stringify(body) : void 0
+  });
+  const text = await res.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = { raw: text };
+  }
+  return { status: res.status, ok: res.ok, data };
+}
+function agendaChanged(prev, next) {
+  return AGENDA_FIELDS.some((f) => JSON.stringify(prev?.[f] ?? null) !== JSON.stringify(next?.[f] ?? null));
+}
+function buildGoogleEvent(task, leadName) {
+  const inicio = new Date(task.prazo);
+  if (Number.isNaN(inicio.getTime())) return null;
+  const fim = new Date(inicio.getTime() + (Number(task.duracao) > 0 ? Number(task.duracao) : 30) * 6e4);
+  const tipo = TASK_TYPE_LABEL[String(task.tipo || "").toLowerCase().replace(/^t-/, "")] || "Tarefa";
+  const done = task.status === "concluida";
+  const link = task.entidadeTipo === "lead" && task.entidadeId && PUBLIC_BASE_URL ? `${PUBLIC_BASE_URL}/#/leads/${task.entidadeId}` : "";
+  const minutes = task.lembrete && task.lembrete !== "nenhum" ? REMINDER_MIN[task.lembrete] : void 0;
+  return {
+    summary: `${done ? "✔ " : ""}[${tipo}] ${task.texto || "Tarefa"}${leadName ? ` — ${leadName}` : ""}`,
+    description: [task.descricao, task.observacoes, leadName ? `Lead: ${leadName}` : "", link ? `Abrir no CRM: ${link}` : ""].filter(Boolean).join("\n\n"),
+    start: { dateTime: inicio.toISOString(), timeZone: "America/Sao_Paulo" },
+    end: { dateTime: fim.toISOString(), timeZone: "America/Sao_Paulo" },
+    reminders: minutes === void 0 ? { useDefault: true } : { useDefault: false, overrides: [{ method: "popup", minutes }] },
+    extendedProperties: { private: { crmTaskId: String(task.id) } }
+  };
+}
+async function syncTasksToGoogle(rows, pusherEmail) {
+  const taskRows = rows.filter((r) => r.entity === "tasks");
+  if (taskRows.length === 0 || !googleConfigured()) return;
+  const sb = db();
+  const prevRows = check(await sb.from("crm_records").select("id, data, deleted").eq("entity", "tasks").in("id", taskRows.map((r) => r.id)), "ler tarefas anteriores") || [];
+  const prevById = new Map(prevRows.map((r) => [r.id, r]));
+  const userIds = [...new Set(taskRows.map((r) => r.data?.responsavelId).filter(Boolean))];
+  const userRows = userIds.length ? check(await sb.from("crm_records").select("id, data").eq("entity", "users").in("id", userIds), "ler usuários") || [] : [];
+  const emailByUser = new Map(userRows.map((r) => [r.id, String(r.data?.email || "").toLowerCase()]));
+  const leadIds = [...new Set(taskRows.filter((r) => r.data?.entidadeTipo === "lead" && r.data?.entidadeId).map((r) => r.data.entidadeId))];
+  const leadRows = leadIds.length ? check(await sb.from("crm_records").select("id, data").eq("entity", "leads").in("id", leadIds), "ler leads") || [] : [];
+  const leadName = new Map(leadRows.map((r) => [r.id, r.data?.nome]));
+  const tokens = /* @__PURE__ */ new Map();
+  const tokenFor = async (email) => {
+    if (!tokens.has(email)) tokens.set(email, await googleAccessToken(email));
+    return tokens.get(email) || null;
+  };
+  for (const row of taskRows) {
+    try {
+      const prev = prevById.get(row.id);
+      const prevData = prev && !prev.deleted ? prev.data : null;
+      const eventId = row.data?.googleEventId || prevData?.googleEventId || null;
+      const owner = String(row.data?.googleCalendarOwner || prevData?.googleCalendarOwner || emailByUser.get(row.data?.responsavelId) || pusherEmail || "").toLowerCase();
+      if (row.deleted || row.data?.status === "cancelada") {
+        if (eventId && owner) {
+          const g2 = await tokenFor(owner);
+          if (g2) await gcal(g2.token, "DELETE", `${GCAL}/${encodeURIComponent(g2.calendarId)}/events/${encodeURIComponent(eventId)}`);
+        }
+        if (!row.deleted) {
+          delete row.data.googleEventId;
+          delete row.data.googleCalendarOwner;
+        }
+        continue;
+      }
+      if (!row.data.googleEventId && prevData?.googleEventId) {
+        row.data.googleEventId = prevData.googleEventId;
+        row.data.googleCalendarOwner = prevData.googleCalendarOwner;
+      }
+      if (eventId && prevData && !agendaChanged(prevData, row.data)) continue;
+      const g = owner ? await tokenFor(owner) : null;
+      if (!g) continue;
+      const evento = buildGoogleEvent(row.data, leadName.get(row.data.entidadeId));
+      if (!evento) continue;
+      const base = `${GCAL}/${encodeURIComponent(g.calendarId)}/events`;
+      let result = eventId ? await gcal(g.token, "PATCH", `${base}/${encodeURIComponent(eventId)}`, evento) : null;
+      if (!result || result.status === 404 || result.status === 410) {
+        result = await gcal(g.token, "POST", base, evento);
+      }
+      if (result.ok && result.data?.id) {
+        row.data.googleEventId = result.data.id;
+        row.data.googleCalendarOwner = owner;
+      } else {
+        console.warn(`[Google Agenda] tarefa ${row.id}: Google respondeu ${result.status}`, JSON.stringify(result.data).slice(0, 300));
+      }
+    } catch (err) {
+      console.warn(`[Google Agenda] tarefa ${row.id}:`, errorMessage(err));
+    }
+  }
+}
+app.get("/api/google/status", async (req, res) => {
+  const base = { configurado: googleConfigured(), redirectUri: PUBLIC_BASE_URL ? googleRedirectUri() : null };
+  if (!googleConfigured()) return res.json({ ...base, conectado: false });
+  try {
+    const row = check(await db().from("google_tokens").select("google_email, last_error, connected_at").eq("crm_email", String(req.authEmail || "").toLowerCase()).maybeSingle(), "ler conexão");
+    return res.json({ ...base, conectado: Boolean(row), googleEmail: row?.google_email || null, erro: row?.last_error || null, conectadoEm: row?.connected_at || null });
+  } catch (err) {
+    return res.status(500).json({ ...base, error: errorMessage(err) });
+  }
+});
+app.post("/api/google/auth-url", (req, res) => {
+  if (!googleConfigured()) return res.status(400).json({ error: "Faltam GOOGLE_CLIENT_ID e GOOGLE_CLIENT_SECRET nas variáveis da Vercel." });
+  const state = signState({ e: String(req.authEmail || "").toLowerCase(), t: Date.now() });
+  const url = "https://accounts.google.com/o/oauth2/v2/auth?" + new URLSearchParams({
+    client_id: GOOGLE_CLIENT_ID,
+    redirect_uri: googleRedirectUri(),
+    response_type: "code",
+    scope: GOOGLE_SCOPES,
+    access_type: "offline",
+    prompt: "consent",
+    include_granted_scopes: "true",
+    state
+  }).toString();
+  return res.json({ url });
+});
+app.get("/api/google/callback", async (req, res) => {
+  const back = (status, motivo) => res.redirect(`${PUBLIC_BASE_URL}/?google=${status}${motivo ? `&motivo=${encodeURIComponent(motivo)}` : ""}#/configuracoes`);
+  if (!googleConfigured()) return res.status(400).send("Google Agenda não configurado no servidor.");
+  if (req.query.error) return back("erro", String(req.query.error));
+  const state = readState(String(req.query.state || ""));
+  if (!state?.e || Date.now() - Number(state.t) > 15 * 6e4) return back("erro", "link expirado, tente de novo");
+  try {
+    const t = await googleToken({ grant_type: "authorization_code", code: String(req.query.code || ""), redirect_uri: googleRedirectUri() });
+    let googleEmail = null;
+    try {
+      googleEmail = JSON.parse(Buffer.from(String(t.id_token || "").split(".")[1] || "", "base64url").toString()).email || null;
+    } catch {
+    }
+    const sb = db();
+    const existing = check(await sb.from("google_tokens").select("refresh_token").eq("crm_email", state.e).maybeSingle(), "ler conexão");
+    const refresh = t.refresh_token || existing?.refresh_token;
+    if (!refresh) return back("erro", "o Google não enviou a autorização permanente; desconecte e conecte de novo");
+    check(await sb.from("google_tokens").upsert({
+      crm_email: state.e,
+      google_email: googleEmail,
+      refresh_token: refresh,
+      access_token: t.access_token,
+      expires_at: new Date(Date.now() + (Number(t.expires_in) || 3600) * 1e3).toISOString(),
+      calendar_id: "primary",
+      last_error: null,
+      connected_at: (/* @__PURE__ */ new Date()).toISOString(),
+      updated_at: (/* @__PURE__ */ new Date()).toISOString()
+    }, { onConflict: "crm_email" }), "gravar conexão do Google");
+    return back("conectado");
+  } catch (err) {
+    console.error("[Google Agenda] callback:", errorMessage(err));
+    return back("erro", errorMessage(err));
+  }
+});
+app.post("/api/google/disconnect", async (req, res) => {
+  try {
+    const email = String(req.authEmail || "").toLowerCase();
+    const row = check(await db().from("google_tokens").select("refresh_token").eq("crm_email", email).maybeSingle(), "ler conexão");
+    if (row?.refresh_token) {
+      await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(row.refresh_token)}`, { method: "POST" }).catch(() => null);
+    }
+    check(await db().from("google_tokens").delete().eq("crm_email", email), "remover conexão");
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ error: errorMessage(err) });
+  }
+});
+app.get("/api/google/events", async (req, res) => {
+  try {
+    const g = await googleAccessToken(String(req.authEmail || ""));
+    if (!g) return res.json({ conectado: false, eventos: [] });
+    const from = new Date(String(req.query.from || ""));
+    const to = new Date(String(req.query.to || ""));
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return res.status(400).json({ error: "Informe from e to (datas ISO)." });
+    const url = `${GCAL}/${encodeURIComponent(g.calendarId)}/events?` + new URLSearchParams({
+      timeMin: from.toISOString(),
+      timeMax: to.toISOString(),
+      singleEvents: "true",
+      orderBy: "startTime",
+      maxResults: "500"
+    }).toString();
+    const r = await gcal(g.token, "GET", url);
+    if (!r.ok) return res.status(502).json({ error: `Google respondeu ${r.status}` });
+    const eventos = (r.data?.items || []).filter((e) => e.status !== "cancelled" && !e.extendedProperties?.private?.crmTaskId).map((e) => ({
+      id: e.id,
+      titulo: e.summary || "(sem título)",
+      inicio: e.start?.dateTime || e.start?.date,
+      fim: e.end?.dateTime || e.end?.date,
+      diaInteiro: Boolean(e.start?.date && !e.start?.dateTime),
+      local: e.location || null,
+      link: e.htmlLink || null
+    }));
+    return res.json({ conectado: true, eventos });
+  } catch (err) {
+    return res.status(500).json({ error: errorMessage(err) });
+  }
+});
 app.post("/api/crm/push", async (req, res) => {
   const changes = Array.isArray(req.body?.changes) ? req.body.changes : [];
   const clientId = String(req.body?.clientId || "navegador").slice(0, 80);
@@ -879,6 +1142,11 @@ app.post("/api/crm/push", async (req, res) => {
         updated_by: req.authEmail || clientId,
         match_key: deleted ? null : matchKeyFor(entity, data)
       });
+    }
+    try {
+      await syncTasksToGoogle([...rows.values()], req.authEmail || "");
+    } catch (err) {
+      console.warn("[Google Agenda] falha ao sincronizar tarefas:", errorMessage(err));
     }
     if (rows.size > 0) {
       check(await db().from("crm_records").upsert([...rows.values()], { onConflict: "entity,id" }), "gravar mudanças");
