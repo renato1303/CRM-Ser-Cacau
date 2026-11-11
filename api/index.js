@@ -1974,6 +1974,53 @@ async function runFollowupTick() {
   }
   return { vencidos: due.length, enviados, detalhes };
 }
+// Teste rápido: envia AGORA a próxima mensagem da sequência deste lead
+// (ignora a data programada e o horário de envio; exige estar logado no CRM)
+app.post("/api/followup/enviar-agora", async (req, res) => {
+  const { leadId } = req.body || {};
+  if (!leadId) return res.status(400).json({ error: "leadId é obrigatório" });
+  try {
+    const sb = db();
+    const row = check(await sb.from("crm_records").select("data").eq("entity", "leads").eq("id", leadId).eq("deleted", false).maybeSingle(), "ler lead");
+    if (!row) return res.status(404).json({ error: "Lead não encontrado no servidor. Aguarde alguns segundos e tente de novo." });
+    const lead = row.data;
+    const f = lead.followup;
+    if (!f || f.status !== "ativo" && f.status !== "pausado") return res.status(400).json({ error: "Este lead não está numa sequência em andamento." });
+    const seq = (await loadSequences()).find((x) => x.id === f.sequenceId);
+    if (!seq) return res.status(400).json({ error: "A sequência deste lead não existe mais." });
+    const step = seq.passos[f.passoAtual];
+    if (!step) return res.status(400).json({ error: "Todas as mensagens da sequência já foram enviadas." });
+    const tpl = check(await sb.from("crm_records").select("data").eq("entity", "messageTemplates").eq("id", step.templateId).maybeSingle(), "ler modelo")?.data;
+    if (!tpl || !String(tpl.corpo || "").trim()) return res.status(400).json({ error: "O modelo desta mensagem não foi encontrado." });
+    const ctx = await leadContext(lead);
+    if (!ctx.phone) return res.status(400).json({ error: "O contato deste lead não tem telefone." });
+    const conv = await pickConversation(ctx.phone);
+    if (!conv) return res.status(400).json({ error: "Nenhuma conexão de WhatsApp ativa no CRM." });
+    const texto = renderTemplate(tpl.corpo, ctx.vars);
+    const messageId = await sendFollowupMessage(conv, texto, ctx.vars.nome);
+    const proximo = seq.passos[f.passoAtual + 1];
+    let proximoEnvioEm = null;
+    if (proximo) {
+      const agendado = addDaysIso(f.iniciadoEm, proximo.diasApos);
+      proximoEnvioEm = new Date(agendado).getTime() > Date.now() ? agendado : addDaysIso((/* @__PURE__ */ new Date()).toISOString(), 1);
+    }
+    lead.followup = {
+      ...f,
+      historico: [...(f.historico || []), { passo: f.passoAtual + 1, enviadoEm: (/* @__PURE__ */ new Date()).toISOString(), messageId, templateId: step.templateId, teste: true }],
+      passoAtual: f.passoAtual + 1,
+      proximoEnvioEm,
+      status: proximo ? f.status : "concluido",
+      motivo: proximo ? f.motivo : "Sequência concluída",
+      versao: Date.now()
+    };
+    await saveLeadData(lead);
+    console.log(`[Follow-up] teste: mensagem ${f.passoAtual + 1} enviada para ${lead.id}`);
+    return res.json({ ok: true, passo: f.passoAtual + 1, total: seq.passos.length, para: ctx.phone.display, texto });
+  } catch (err) {
+    console.error("[Follow-up enviar-agora]", errorMessage(err));
+    return res.status(502).json({ error: errorMessage(err) });
+  }
+});
 // Relógio: chamado pelo Supabase (pg_cron) a cada 15 minutos
 app.post("/api/followup/tick", async (req, res) => {
   if (!ingestAuthorized(req)) return res.status(401).json({ error: "Segredo inválido (x-ingest-secret)." });

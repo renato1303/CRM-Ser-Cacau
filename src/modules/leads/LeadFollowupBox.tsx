@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Repeat, Pause, Play, Square, Send } from 'lucide-react';
+import { Repeat, Pause, Play, Square, Send, Zap } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { Lead } from '../../types';
 import { confirmDialog } from '../../components/ui/ConfirmDialog';
@@ -16,12 +16,41 @@ const STATUS: Record<string, { label: string; cls: string }> = {
 
 // Card do lead: situação do follow-up automático e botões de controle
 export const LeadFollowupBox: React.FC<{ lead: Lead }> = ({ lead }) => {
-  const { followupSequences, startFollowup, pauseFollowup, resumeFollowup, stopFollowup } = useStore();
+  const { followupSequences, startFollowup, pauseFollowup, resumeFollowup, stopFollowup, addToast, refreshData } = useStore();
+  const [enviando, setEnviando] = useState(false);
   const ativas = followupSequences.filter(s => s.ativo && s.passos.length > 0);
   const [escolhida, setEscolhida] = useState(ativas[0]?.id || '');
   const f = lead.followup;
   const st = f ? STATUS[f.status] : null;
   const btn = 'flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border';
+
+  // Teste rápido: manda agora a próxima mensagem (de verdade) e avança a sequência
+  const enviarAgora = async () => {
+    if (!f) return;
+    const ok = await confirmDialog({
+      title: `Enviar agora a mensagem ${(f.historico?.length || 0) + 1} de ${f.totalPassos}?`,
+      message: 'A mensagem sai de verdade pelo WhatsApp para este lead, sem esperar a data programada. Use para testar com um número seu.',
+      confirmLabel: 'Enviar agora',
+      danger: false,
+    });
+    if (!ok) return;
+    setEnviando(true);
+    try {
+      const res = await fetch('/api/followup/enviar-agora', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ leadId: lead.id }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Erro ${res.status}`);
+      addToast(`Mensagem ${data.passo} de ${data.total} enviada`, `Para ${data.para}`, 'success');
+      await refreshData();
+    } catch (err: any) {
+      addToast('Não foi possível enviar', err.message || 'Tente de novo.', 'error');
+    } finally {
+      setEnviando(false);
+    }
+  };
 
   return (
     <div className="space-y-2">
@@ -57,6 +86,13 @@ export const LeadFollowupBox: React.FC<{ lead: Lead }> = ({ lead }) => {
               {f.status === 'pausado' && (
                 <button type="button" onClick={() => resumeFollowup(lead.id)} className={`${btn} border-emerald-300 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950/40`}>
                   <Play className="w-3.5 h-3.5" /> Retomar
+                </button>
+              )}
+              {(f.status === 'ativo' || f.status === 'pausado') && (
+                <button type="button" onClick={enviarAgora} disabled={enviando}
+                  title="Teste rápido: envia agora a próxima mensagem, sem esperar a data"
+                  className={`${btn} border-indigo-300 text-indigo-600 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 disabled:opacity-50`}>
+                  <Zap className="w-3.5 h-3.5" /> {enviando ? 'Enviando…' : 'Enviar próxima agora'}
                 </button>
               )}
               {(f.status === 'ativo' || f.status === 'pausado') && (
