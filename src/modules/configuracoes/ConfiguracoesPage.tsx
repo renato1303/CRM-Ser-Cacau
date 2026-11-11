@@ -7,14 +7,15 @@ import { Modal } from '../../components/ui/Modal';
 import { db } from '../../services/db/storage';
 import { TagsSettings } from './TagsSettings';
 import { IntegracoesSettings } from './IntegracoesSettings';
+import { FollowupSettings } from './FollowupSettings';
 
 export const ConfiguracoesPage: React.FC = () => {
   const { 
-    messageTemplates, addMessageTemplate, deleteMessageTemplate, 
+    messageTemplates, addMessageTemplate, deleteMessageTemplate, updateMessageTemplate, followupSequences, 
     emailTemplates, addEmailTemplate, deleteEmailTemplate, 
     restoreSeed, clearAllData, clearAllDataCompletely, tags 
   } = useStore();
-  const [tab, setTab] = useState<'etiquetas' | 'integracoes' | 'templates' | 'email_templates'>(
+  const [tab, setTab] = useState<'etiquetas' | 'integracoes' | 'followup' | 'templates' | 'email_templates'>(
     () => (new URLSearchParams(window.location.search).get('google') ? 'integracoes' : 'etiquetas')
   );
   const [toastMsg, setToastMsg] = useState<string | null>(null);
@@ -24,6 +25,7 @@ export const ConfiguracoesPage: React.FC = () => {
   const [tplNome, setTplNome] = useState('');
   const [tplCanal, setTplCanal] = useState('whatsapp');
   const [tplCorpo, setTplCorpo] = useState('');
+  const [editingTplId, setEditingTplId] = useState<string | null>(null);
 
   // New email template modal
   const [emailModalOpen, setEmailModalOpen] = useState(false);
@@ -34,16 +36,28 @@ export const ConfiguracoesPage: React.FC = () => {
   const handleCreateTemplate = (e: React.FormEvent) => {
     e.preventDefault();
     if (!tplNome.trim() || !tplCorpo.trim()) return;
-    addMessageTemplate({
-      nome: tplNome,
-      canal: tplCanal,
-      corpo: tplCorpo,
-      variaveis: ['contato.nome', 'usuario.nome', 'lead.nome']
-    });
+    if (editingTplId) {
+      updateMessageTemplate(editingTplId, { nome: tplNome, canal: tplCanal, corpo: tplCorpo });
+    } else {
+      addMessageTemplate({ nome: tplNome, canal: tplCanal, corpo: tplCorpo, variaveis: [] });
+    }
     setTplNome('');
     setTplCorpo('');
+    setEditingTplId(null);
     setModalOpen(false);
   };
+
+  const openEditTemplate = (tpl: { id: string; nome: string; canal: string; corpo: string }) => {
+    setEditingTplId(tpl.id);
+    setTplNome(tpl.nome);
+    setTplCanal(tpl.canal || 'whatsapp');
+    setTplCorpo(tpl.corpo);
+    setModalOpen(true);
+  };
+
+  // Em quais sequências de follow-up cada modelo é usado
+  const usoNosFollowups = (tplId: string) =>
+    followupSequences.flatMap(sq => sq.passos.map((p, i) => (p.templateId === tplId ? `${sq.nome} (mensagem ${i + 1})` : null)).filter(Boolean) as string[]);
 
   const handleCreateEmailTemplate = (e: React.FormEvent) => {
     e.preventDefault();
@@ -76,6 +90,7 @@ export const ConfiguracoesPage: React.FC = () => {
         tabs={[
           { id: 'etiquetas', label: 'Etiquetas', badge: tags.length },
           { id: 'integracoes', label: 'Integrações' },
+          { id: 'followup', label: 'Follow-up', badge: followupSequences.length },
           { id: 'templates', label: 'Modelos de Mensagem', badge: messageTemplates.length },
           { id: 'email_templates', label: 'Modelos de E-mail', badge: emailTemplates.length },
         ]}
@@ -88,6 +103,8 @@ export const ConfiguracoesPage: React.FC = () => {
 
       {tab === 'integracoes' && <IntegracoesSettings />}
 
+      {tab === 'followup' && <FollowupSettings onEditTemplates={() => setTab('templates')} />}
+
       {tab === 'templates' && (
         <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm p-6 flex flex-col flex-1">
           <div className="flex items-center justify-between mb-6">
@@ -95,7 +112,7 @@ export const ConfiguracoesPage: React.FC = () => {
               <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">Modelos para o Compositor (Atalho "/")</h3>
               <p className="text-xs text-slate-500">Crie modelos com variáveis preenchidas automaticamente (ex: <code className="text-indigo-600">{'{{contato.nome}}'}</code>).</p>
             </div>
-            <Button size="sm" onClick={() => setModalOpen(true)} className="gap-2">
+            <Button size="sm" onClick={() => { setEditingTplId(null); setTplNome(''); setTplCorpo(''); setModalOpen(true); }} className="gap-2">
               <Plus className="w-4 h-4" /> Novo Modelo
             </Button>
           </div>
@@ -108,9 +125,18 @@ export const ConfiguracoesPage: React.FC = () => {
                     <h4 className="font-bold text-sm text-slate-900 dark:text-slate-100">{tpl.nome}</h4>
                     <span className="px-2 py-0.5 rounded text-[10px] uppercase font-semibold bg-indigo-100 text-indigo-700">{tpl.canal}</span>
                   </div>
-                  <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed mb-4">{tpl.corpo}</p>
+                  <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed mb-2 whitespace-pre-line">{tpl.corpo}</p>
+                  {usoNosFollowups(tpl.id).length > 0 && (
+                    <p className="text-[11px] text-indigo-600 dark:text-indigo-400 mb-3">Usado em: {usoNosFollowups(tpl.id).join(', ')}</p>
+                  )}
                 </div>
-                <div className="flex justify-end pt-2 border-t border-slate-200 dark:border-slate-700">
+                <div className="flex justify-end gap-4 pt-2 border-t border-slate-200 dark:border-slate-700">
+                  <button
+                    onClick={() => openEditTemplate(tpl)}
+                    className="text-xs text-indigo-600 hover:underline"
+                  >
+                    Editar
+                  </button>
                   <button 
                     onClick={() => deleteMessageTemplate(tpl.id)}
                     className="text-xs text-red-500 hover:underline flex items-center gap-1"
@@ -159,7 +185,7 @@ export const ConfiguracoesPage: React.FC = () => {
       )}
 
       {/* New Template Modal */}
-      <Modal isOpen={modalOpen} onClose={() => setModalOpen(false)} title="Criar Novo Modelo de Mensagem">
+      <Modal isOpen={modalOpen} onClose={() => { setModalOpen(false); setEditingTplId(null); }} title={editingTplId ? 'Editar Modelo de Mensagem' : 'Criar Novo Modelo de Mensagem'}>
         <form onSubmit={handleCreateTemplate} className="space-y-4">
           <div>
             <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">Nome do Modelo *</label>
@@ -187,9 +213,12 @@ export const ConfiguracoesPage: React.FC = () => {
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">Corpo da Mensagem (com variáveis <code className="text-indigo-600">{'{{contato.nome}}'}</code>) *</label>
+            <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">Corpo da Mensagem *</label>
+            <p className="text-[11px] text-slate-500 mb-1">
+              Variáveis: <code className="text-indigo-600">{'{{primeiro_nome}}'}</code>, <code className="text-indigo-600">{'{{nome}}'}</code>, <code className="text-indigo-600">{'{{empresa}}'}</code>, <code className="text-indigo-600">{'{{segmento}}'}</code>
+            </p>
             <textarea
-              rows={4}
+              rows={7}
               required
               placeholder="Olá {{contato.nome}}, ..."
               value={tplCorpo}

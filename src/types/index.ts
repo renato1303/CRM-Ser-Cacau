@@ -131,6 +131,7 @@ export interface Lead {
   rastreamento?: LeadTracking;
   qualificacao?: LeadQualification;
   disparos?: LeadDispatch[];
+  followup?: LeadFollowup;
 }
 
 // Mensagens enviadas pelos disparos do n8n
@@ -404,6 +405,43 @@ export interface SavedLeadFilter {
   nome: string;
   filtro: LeadFilterState;
   createdAt: string;
+}
+
+// ==========================================
+// Sequências de follow-up (ex.: pós-catálogo)
+// ==========================================
+export interface FollowupStep {
+  id: string;
+  diasApos: number;      // dias depois do início (ex.: envio do catálogo)
+  templateId: string;    // modelo de mensagem usado neste passo
+}
+
+export interface FollowupSequence {
+  id: string;
+  nome: string;
+  ativo: boolean;
+  gatilho: { tipo: 'documento' | 'manual'; palavraChave?: string };
+  pausarQuandoResponder: boolean;
+  janela: { dias: number[]; inicio: string; fim: string }; // dias: 0 = domingo ... 6 = sábado
+  passos: FollowupStep[];
+  createdAt?: string;
+}
+
+export interface LeadFollowup {
+  sequenceId: string;
+  sequenceNome?: string;
+  status: 'ativo' | 'pausado' | 'concluido' | 'encerrado';
+  origem?: string;
+  motivo?: string;
+  iniciadoEm: string;
+  retomadoEm?: string;
+  pausadoEm?: string;
+  encerradoEm?: string;
+  passoAtual: number;
+  totalPassos: number;
+  proximoEnvioEm: string | null;
+  historico: { passo: number; enviadoEm: string; messageId?: string; templateId?: string }[];
+  versao: number;
 }
 
 

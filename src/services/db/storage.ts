@@ -1,6 +1,6 @@
 import { 
   User, Team, Role, Pipeline, Tag, LeadSource, LossReason, 
-  Lead, Contact, Company, Product, Task, Note, Conversation, Message, Channel, ActivityEvent, Notification, MessageTemplate, EmailMessage, EmailTemplate, AutomationRule, SalesBot, TaskTypeConfig, TaskOutcomeConfig, SavedLeadFilter 
+  Lead, Contact, Company, Product, Task, Note, Conversation, Message, Channel, ActivityEvent, Notification, MessageTemplate, EmailMessage, EmailTemplate, AutomationRule, SalesBot, TaskTypeConfig, TaskOutcomeConfig, SavedLeadFilter, FollowupSequence
 } from '../../types';
 import { 
   initialUsers, initialTeams, initialRoles, initialPipelines, initialTags, 
@@ -82,6 +82,18 @@ export const db = {
   },
 
   // Configurações gerais compartilhadas (ex.: marcador da limpeza dos dados de exemplo)
+  getFollowupSequences: (): FollowupSequence[] => {
+    try {
+      const raw = localStorage.getItem('conversa_crm_followup_sequences_v1');
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  },
+  saveFollowupSequences: (items: FollowupSequence[]) => {
+    localStorage.setItem('conversa_crm_followup_sequences_v1', JSON.stringify(items));
+    queueSync('followupSequences', items);
+  },
   getSettings: (): Array<{ id: string; [key: string]: any }> => {
     try {
       const raw = localStorage.getItem('conversa_crm_settings_v1');

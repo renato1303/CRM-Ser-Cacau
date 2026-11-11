@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { 
   ArrowLeft, Building, Phone, Mail, DollarSign, Calendar, 
   MessageSquare, FileText, CheckCircle2, Sparkles, Send, Paperclip, Plus, User, Tag as TagIcon 
@@ -8,6 +8,8 @@ import { TagPicker } from './TagPicker';
 import { WonValueModal } from './WonValueModal';
 import { leadProductsTotal } from './leadFilters';
 import { toLocalInput } from '../../services/googleCalendar';
+import { LeadFollowupBox } from './LeadFollowupBox';
+import { confirmDialog } from '../../components/ui/ConfirmDialog';
 import { formatCurrency, formatDate } from '../../utils/cn';
 import { Button } from '../../components/ui/Button';
 import { Tabs } from '../../components/ui/Tabs';
@@ -23,7 +25,7 @@ export const LeadDetailPage: React.FC<LeadDetailPageProps> = ({ leadId }) => {
   const { 
     leads, contacts, companies, users, pipelines, notes, tasks, 
     messages, conversations, setActiveModule, updateLead, addNote, addTask, sendMessage, addContact,
-    tags, addTag, setLeadTags, moveLeadStage, winLead, addToast, taskTypes
+    tags, addTag, setLeadTags, moveLeadStage, winLead, addToast, taskTypes, deleteNote, completeTask
   } = useStore();
   // Tarefa criada pelo card: tipo, data/hora, duração e lembrete
   const [taskTipo, setTaskTipo] = useState(() => taskTypes.find(t => /reuni/i.test(t.id) || /reuni/i.test(t.nome))?.id || taskTypes[0]?.id || 'reuniao');
@@ -40,6 +42,29 @@ export const LeadDetailPage: React.FC<LeadDetailPageProps> = ({ leadId }) => {
 
   const lead = leads.find(l => l.id === leadId);
   const contact = contacts.find(c => lead?.contactIds.includes(c.id));
+
+  // ---------- Histórico SÓ deste lead ----------
+  // Conversas do lead: pelo lead, pelos contatos dele ou pelo telefone (DDD + 8 últimos dígitos)
+  const phoneKey = (raw?: string) => {
+    let d = (raw || '').replace(/\D/g, '');
+    if (d.length === 10 || d.length === 11) d = '55' + d;
+    return d.startsWith('55') && (d.length === 12 || d.length === 13) ? `55${d.slice(2, 4)}${d.slice(-8)}` : d;
+  };
+  const leadConversations = useMemo(() => {
+    if (!lead) return [];
+    const leadContacts = contacts.filter(c => lead.contactIds.includes(c.id));
+    const keys = new Set(leadContacts.flatMap(c => (c.telefones || []).map(phoneKey)).filter(Boolean));
+    return conversations
+      .filter(c => c.leadId === lead.id || lead.contactIds.includes(c.contactId)
+        || (c.id.startsWith('wa:') && keys.has(phoneKey(c.id.split(':').pop()))))
+      .sort((a, b) => new Date(b.ultimaMensagemAt).getTime() - new Date(a.ultimaMensagemAt).getTime());
+  }, [lead, contacts, conversations]);
+  const leadMessages = useMemo(() => {
+    const ids = new Set(leadConversations.map(c => c.id));
+    return messages.filter(m => ids.has(m.conversationId));
+  }, [leadConversations, messages]);
+  const leadNotes = useMemo(() => notes.filter(n => lead && (n.entidadeId === lead.id || lead.contactIds.includes(n.entidadeId))), [notes, lead]);
+  const leadTasks = useMemo(() => tasks.filter(t => lead && t.entidadeId === lead.id), [tasks, lead]);
   const company = companies.find(c => c.id === lead?.companyId);
   const pipeline = pipelines.find(p => p.id === lead?.pipelineId);
   const stages = pipeline?.stages || [];
@@ -47,6 +72,7 @@ export const LeadDetailPage: React.FC<LeadDetailPageProps> = ({ leadId }) => {
 
   const [activeTab, setActiveTab] = useState<'principal' | 'estatisticas' | 'produtos'>('principal');
   const [feedFilter, setFeedFilter] = useState<'tudo' | 'chats' | 'notas' | 'tarefas'>('tudo');
+  const feedRef = useRef<HTMLDivElement>(null);
   
   // Composer state
   const [composerMode, setComposerMode] = useState<'chat' | 'nota' | 'tarefa'>('chat');
@@ -54,6 +80,19 @@ export const LeadDetailPage: React.FC<LeadDetailPageProps> = ({ leadId }) => {
   const [taskPrazo, setTaskPrazo] = useState('hoje');
   const [aiSummary, setAiSummary] = useState<string | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
+
+  // Ao abrir outro lead: volta para as abas iniciais
+  useEffect(() => {
+    setActiveTab('principal');
+    setFeedFilter('tudo');
+    setComposerMode('chat');
+  }, [leadId]);
+
+  // Mostra as mensagens mais recentes (fim do histórico)
+  useEffect(() => {
+    const el = feedRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [leadId, feedFilter, leadMessages.length, leadNotes.length, leadTasks.length]);
 
   if (!lead) {
     return (
@@ -66,10 +105,12 @@ export const LeadDetailPage: React.FC<LeadDetailPageProps> = ({ leadId }) => {
 
   const handleSendMessage = () => {
     if (!composerText.trim()) return;
-    const conv = conversations.find(c => c.contactId === contact?.id) || conversations[0];
-    if (conv) {
-      sendMessage(conv.id, composerText, 'saida', 'usuario');
+    const conv = leadConversations[0];
+    if (!conv) {
+      addToast('Sem conversa no WhatsApp', 'Este lead ainda não tem conversa. Envie a primeira mensagem pelo celular ou pelos disparos; depois ela aparece aqui.', 'error');
+      return;
     }
+    sendMessage(conv.id, composerText, 'saida', 'usuario');
     setComposerText('');
   };
 
@@ -299,6 +340,9 @@ export const LeadDetailPage: React.FC<LeadDetailPageProps> = ({ leadId }) => {
               })()}
             </div>
 
+            {/* Follow-up automático */}
+            <LeadFollowupBox lead={lead} />
+
             {/* Contato Principal */}
             <div className="space-y-3">
               <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Contato Principal</h4>
@@ -443,7 +487,12 @@ export const LeadDetailPage: React.FC<LeadDetailPageProps> = ({ leadId }) => {
             {(['tudo', 'chats', 'notas', 'tarefas'] as const).map(tab => (
               <button
                 key={tab}
-                onClick={() => setFeedFilter(tab)}
+                onClick={() => {
+                  setFeedFilter(tab);
+                  if (tab === 'notas') setComposerMode('nota');
+                  else if (tab === 'tarefas') setComposerMode('tarefa');
+                  else if (tab === 'chats') setComposerMode('chat');
+                }}
                 className={`px-3 py-1.5 rounded-lg text-xs font-medium capitalize transition-colors ${feedFilter === tab ? 'bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400 font-semibold' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
               >
                 {tab}
@@ -473,44 +522,104 @@ export const LeadDetailPage: React.FC<LeadDetailPageProps> = ({ leadId }) => {
           </div>
         )}
 
-        {/* Timeline / Messages Feed */}
-        <div className="flex-1 p-6 overflow-y-auto space-y-4">
-          {messages.map(msg => (
-            <div key={msg.id} className={`flex gap-3 ${msg.direcao === 'saida' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[70%] p-3.5 rounded-2xl text-xs leading-relaxed ${
-                msg.direcao === 'saida'
-                  ? 'bg-indigo-600 text-white rounded-br-none'
-                  : 'bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200 rounded-bl-none'
-              }`}>
-                <p>{msg.conteudo}</p>
-                <span className={`text-[10px] block mt-1 text-right ${msg.direcao === 'saida' ? 'text-indigo-200' : 'text-slate-400'}`}>
-                  {formatDate(msg.enviadaAt)} · WhatsApp
-                </span>
-              </div>
-            </div>
-          ))}
-
-          {notes.filter(n => n.entidadeId === lead.id).map(note => (
-            <div key={note.id} className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/50 text-xs text-amber-900 dark:text-amber-200">
-              <div className="flex items-center justify-between mb-1">
-                <span className="font-bold">Nota Interna</span>
-                <span>{formatDate(note.createdAt)}</span>
-              </div>
-              <p>{note.texto}</p>
-            </div>
-          ))}
-
-          {tasks.filter(t => t.entidadeId === lead.id).map(task => (
-            <div key={task.id} className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs flex items-center justify-between">
-              <div>
-                <p className="font-bold text-slate-900 dark:text-slate-100 mb-0.5">Tarefa: {task.texto}</p>
-                <p className="text-slate-500">Prazo: {formatDate(task.prazo)} · Status: {task.status}</p>
-              </div>
-              <span className={`px-2.5 py-1 rounded-full text-[10px] font-semibold ${task.status === 'concluida' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
-                {task.status}
-              </span>
-            </div>
-          ))}
+        {/* Histórico: só deste lead, em ordem de data, filtrado pela aba */}
+        <div ref={feedRef} className="flex-1 p-6 overflow-y-auto space-y-4">
+          {(() => {
+            const typeName = (id: string) => taskTypes.find(t => t.id === id)?.nome || id.replace(/^t-/, '');
+            const authorName = (id: string) => users.find(u => u.id === id)?.nome || 'Equipe';
+            type Item = { kind: 'msg' | 'nota' | 'tarefa'; at: number; node: React.ReactNode; key: string };
+            const items: Item[] = [];
+            if (feedFilter === 'tudo' || feedFilter === 'chats') {
+              leadMessages.forEach(msg => items.push({
+                kind: 'msg', key: `m-${msg.id}`, at: new Date(msg.enviadaAt).getTime(),
+                node: (
+                  <div className={`flex gap-3 ${msg.direcao === 'saida' ? 'justify-end' : 'justify-start'}`}>
+                    <div className={`max-w-[70%] p-3.5 rounded-2xl text-xs leading-relaxed ${
+                      msg.direcao === 'saida'
+                        ? 'bg-indigo-600 text-white rounded-br-none'
+                        : 'bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200 rounded-bl-none'
+                    }`}>
+                      <p className="whitespace-pre-line">{msg.conteudo}</p>
+                      <span className={`text-[10px] block mt-1 text-right ${msg.direcao === 'saida' ? 'text-indigo-200' : 'text-slate-400'}`}>
+                        {formatDate(msg.enviadaAt)} · WhatsApp
+                      </span>
+                    </div>
+                  </div>
+                ),
+              }));
+            }
+            if (feedFilter === 'tudo' || feedFilter === 'notas') {
+              leadNotes.forEach(note => items.push({
+                kind: 'nota', key: `n-${note.id}`, at: new Date(note.createdAt).getTime(),
+                node: (
+                  <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/50 text-xs text-amber-900 dark:text-amber-200">
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <span className="font-bold">Nota · {authorName(note.autorId)}</span>
+                      <span className="flex items-center gap-2">
+                        {formatDate(note.createdAt)}
+                        <button
+                          type="button"
+                          aria-label="Excluir nota"
+                          onClick={async () => { if (await confirmDialog({ title: 'Excluir esta nota?' })) deleteNote(note.id); }}
+                          className="text-amber-700/60 hover:text-red-600"
+                        >
+                          ✕
+                        </button>
+                      </span>
+                    </div>
+                    <p className="whitespace-pre-line">{note.texto}</p>
+                  </div>
+                ),
+              }));
+            }
+            if (feedFilter === 'tudo' || feedFilter === 'tarefas') {
+              leadTasks.forEach(task => {
+                const done = task.status === 'concluida';
+                const late = !done && task.status !== 'cancelada' && new Date(task.prazo).getTime() < Date.now();
+                items.push({
+                  kind: 'tarefa', key: `t-${task.id}`,
+                  // Na aba Tarefas, ordena pelo prazo; em Tudo, pela criação
+                  at: new Date(feedFilter === 'tarefas' ? task.prazo : (task.createdAt || task.prazo)).getTime(),
+                  node: (
+                    <div className={`p-4 rounded-xl border text-xs flex items-center justify-between gap-3 ${late ? 'bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-900/50' : 'bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700'}`}>
+                      <div className="flex items-start gap-3 min-w-0">
+                        <input
+                          type="checkbox"
+                          checked={done}
+                          disabled={done || task.status === 'cancelada'}
+                          onChange={() => completeTask(task.id)}
+                          aria-label="Concluir tarefa"
+                          className="mt-0.5"
+                        />
+                        <div className="min-w-0">
+                          <p className={`font-bold text-slate-900 dark:text-slate-100 mb-0.5 ${done ? 'line-through text-slate-400' : ''}`}>
+                            [{typeName(task.tipo)}] {task.texto}
+                          </p>
+                          <p className={late ? 'text-red-600 dark:text-red-400' : 'text-slate-500'}>
+                            Prazo: {formatDate(task.prazo)}{late ? ' · atrasada' : ''}
+                          </p>
+                        </div>
+                      </div>
+                      <span className={`px-2.5 py-1 rounded-full text-[10px] font-semibold shrink-0 ${done ? 'bg-green-100 text-green-700' : task.status === 'cancelada' ? 'bg-slate-200 text-slate-600' : 'bg-amber-100 text-amber-700'}`}>
+                        {done ? 'Concluída' : task.status === 'cancelada' ? 'Cancelada' : 'Pendente'}
+                      </span>
+                    </div>
+                  ),
+                });
+              });
+            }
+            items.sort((x, y) => x.at - y.at);
+            if (items.length === 0) {
+              const vazio = {
+                tudo: 'Ainda não há mensagens, notas ou tarefas para este lead.',
+                chats: 'Nenhuma mensagem com este lead ainda.',
+                notas: 'Nenhuma nota ainda. Escreva abaixo, em "Nova Nota", as atualizações e combinados com este lead.',
+                tarefas: 'Nenhuma tarefa ainda. Use "Criar Tarefa" abaixo para agendar ligações, reuniões e follow-ups.',
+              }[feedFilter];
+              return <p className="text-xs text-slate-400 text-center py-10">{vazio}</p>;
+            }
+            return items.map(it => <React.Fragment key={it.key}>{it.node}</React.Fragment>);
+          })()}
         </div>
 
         {/* Composer Footer */}

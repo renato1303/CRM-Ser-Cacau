@@ -1,11 +1,12 @@
 import { create } from 'zustand';
 import { 
   User, Pipeline, Tag, LeadSource, LossReason, 
-  Lead, Contact, Company, Product, Task, Note, Conversation, Message, Channel, ActivityEvent, Notification, MessageTemplate, EmailMessage, EmailTemplate, AutomationRule, SalesBot, BotNode, TaskTypeConfig, TaskOutcomeConfig, SavedLeadFilter, LeadFilterState 
+  Lead, Contact, Company, Product, Task, Note, Conversation, Message, Channel, ActivityEvent, Notification, MessageTemplate, EmailMessage, EmailTemplate, AutomationRule, SalesBot, BotNode, TaskTypeConfig, TaskOutcomeConfig, SavedLeadFilter, LeadFilterState, FollowupSequence, LeadFollowup
 } from '../types';
 import { db } from '../services/db/storage';
 import { pullCrmChanges } from '../services/db/sync';
 import { cleanupDemoDataOnce } from '../services/db/cleanup';
+import { seedFollowupOnce } from '../services/db/followupSeed';
 import { supabaseService, supabase } from '../services/db/supabase';
 
 interface CRMState {
@@ -94,6 +95,7 @@ interface CRMState {
 
   // Note actions
   addNote: (note: Omit<Note, 'id' | 'createdAt'>) => Note;
+  deleteNote: (id: string) => void;
 
   // Chat actions
   sendMessage: (conversationId: string, conteudo: string, direcao?: 'entrada' | 'saida' | 'interna', autor?: 'contato' | 'usuario' | 'bot' | 'ia', tipo?: 'texto' | 'imagem' | 'audio' | 'arquivo' | 'modelo', anexos?: any[]) => void;
@@ -106,6 +108,14 @@ interface CRMState {
   // Template actions
   addMessageTemplate: (template: Omit<MessageTemplate, 'id'>) => void;
   deleteMessageTemplate: (id: string) => void;
+  updateMessageTemplate: (id: string, updates: Partial<MessageTemplate>) => void;
+  followupSequences: FollowupSequence[];
+  saveFollowupSequence: (seq: FollowupSequence) => void;
+  deleteFollowupSequence: (id: string) => void;
+  startFollowup: (leadId: string, sequenceId: string) => void;
+  pauseFollowup: (leadId: string) => void;
+  resumeFollowup: (leadId: string) => void;
+  stopFollowup: (leadId: string) => void;
 
   // Email actions
   sendEmail: (email: Omit<EmailMessage, 'id' | 'enviadoAt' | 'lido'>) => void;
@@ -322,6 +332,7 @@ export const useStore = create<CRMState>((set, get) => ({
   pipelines: db.getPipelines(),
   tags: db.getTags(),
   savedFilters: db.getSavedLeadFilters(),
+  followupSequences: db.getFollowupSequences(),
   sources: db.getSources(),
   lossReasons: db.getLossReasons(),
   companies: db.getCompanies(),
@@ -418,6 +429,7 @@ export const useStore = create<CRMState>((set, get) => ({
   refreshData: async () => {
     await pullCrmChanges();
     cleanupDemoDataOnce();
+    seedFollowupOnce();
     try {
       const hasWaConversations = db.getConversations().some(c => c.id.startsWith('wa:'));
       let since = hasWaConversations ? (localStorage.getItem(WA_FEED_SINCE_KEY) || WA_EPOCH) : WA_EPOCH;
@@ -442,6 +454,7 @@ export const useStore = create<CRMState>((set, get) => ({
       pipelines: db.getPipelines(),
       tags: db.getTags(),
     savedFilters: db.getSavedLeadFilters(),
+      followupSequences: db.getFollowupSequences(),
       companies: db.getCompanies(),
       products: db.getProducts(),
       contacts: db.getContacts(),
@@ -705,6 +718,12 @@ export const useStore = create<CRMState>((set, get) => ({
     return newNote;
   },
 
+  deleteNote: (id) => {
+    const notes = get().notes.filter(n => n.id !== id);
+    db.saveNotes(notes);
+    set({ notes });
+  },
+
   sendMessage: (conversationId, conteudo, direcao = 'saida', autor = 'usuario', tipo = 'texto', anexos = []) => {
     const newMessage: Message = {
       id: `msg-${Date.now()}`,
@@ -870,6 +889,63 @@ export const useStore = create<CRMState>((set, get) => ({
     const messageTemplates = get().messageTemplates.filter(t => t.id !== id);
     db.saveMessageTemplates(messageTemplates);
     set({ messageTemplates });
+  },
+
+  updateMessageTemplate: (id, updates) => {
+    const messageTemplates = get().messageTemplates.map(t => t.id === id ? { ...t, ...updates, id } : t);
+    db.saveMessageTemplates(messageTemplates);
+    set({ messageTemplates });
+    get().addToast('Modelo Atualizado', 'As próximas mensagens já usam o texto novo.');
+  },
+
+  // ---------- Sequências de follow-up ----------
+  saveFollowupSequence: (seq) => {
+    const exists = get().followupSequences.some(s => s.id === seq.id);
+    const followupSequences = exists
+      ? get().followupSequences.map(s => s.id === seq.id ? seq : s)
+      : [...get().followupSequences, { ...seq, createdAt: seq.createdAt || new Date().toISOString() }];
+    db.saveFollowupSequences(followupSequences);
+    set({ followupSequences });
+  },
+
+  deleteFollowupSequence: (id) => {
+    const followupSequences = get().followupSequences.filter(s => s.id !== id);
+    db.saveFollowupSequences(followupSequences);
+    set({ followupSequences });
+  },
+
+  startFollowup: (leadId, sequenceId) => {
+    const seq = get().followupSequences.find(s => s.id === sequenceId);
+    if (!seq || seq.passos.length === 0) return;
+    const now = new Date().toISOString();
+    const followup: LeadFollowup = {
+      sequenceId: seq.id, sequenceNome: seq.nome, status: 'ativo', origem: 'Iniciado manualmente', iniciadoEm: now,
+      passoAtual: 0, totalPassos: seq.passos.length,
+      proximoEnvioEm: new Date(Date.now() + seq.passos[0].diasApos * 86400000).toISOString(),
+      historico: [], versao: Date.now(),
+    };
+    get().updateLead(leadId, { followup });
+    get().addToast('Follow-up iniciado', `${seq.nome}: primeira mensagem em ${seq.passos[0].diasApos} dia(s).`, 'success');
+  },
+
+  pauseFollowup: (leadId) => {
+    const f = get().leads.find(l => l.id === leadId)?.followup;
+    if (!f) return;
+    get().updateLead(leadId, { followup: { ...f, status: 'pausado', motivo: 'Pausado manualmente', pausadoEm: new Date().toISOString(), versao: Date.now() } });
+  },
+
+  resumeFollowup: (leadId) => {
+    const f = get().leads.find(l => l.id === leadId)?.followup;
+    if (!f) return;
+    // Se o envio programado já passou durante a pausa, sai no próximo ciclo (até 15 minutos)
+    const proximo = f.proximoEnvioEm && new Date(f.proximoEnvioEm).getTime() > Date.now() ? f.proximoEnvioEm : new Date().toISOString();
+    get().updateLead(leadId, { followup: { ...f, status: 'ativo', motivo: undefined, retomadoEm: new Date().toISOString(), proximoEnvioEm: proximo, versao: Date.now() } });
+  },
+
+  stopFollowup: (leadId) => {
+    const f = get().leads.find(l => l.id === leadId)?.followup;
+    if (!f) return;
+    get().updateLead(leadId, { followup: { ...f, status: 'encerrado', motivo: 'Encerrado manualmente', encerradoEm: new Date().toISOString(), versao: Date.now() } });
   },
 
   sendEmail: (emailData) => {

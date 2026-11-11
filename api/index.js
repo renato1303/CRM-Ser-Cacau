@@ -228,6 +228,13 @@ async function saveIncomingMessage(instance, msg, live) {
     }
     check(await sb.from("wa_messages").update(update).eq("id", key.id), "atualizar mensagem");
   }
+  if (live && isNew) {
+    try {
+      await followupOnMessage({ instance, phone, fromMe, content, sentAt });
+    } catch (err) {
+      console.warn("[Follow-up] falha ao avaliar mensagem:", errorMessage(err));
+    }
+  }
   return isNew ? "nova" : "atualizada";
 }
 async function updateMessageStatus(item) {
@@ -276,7 +283,8 @@ const PUBLIC_API = [
   /^\/api\/wa\/diagnostics/,
   /^\/api\/leads\/ingest/,
   /^\/api\/disparos\//,
-  /^\/api\/google\/callback/
+  /^\/api\/google\/callback/,
+  /^\/api\/followup\/tick/
 ];
 const tokenCache = /* @__PURE__ */ new Map();
 app.use("/api", async (req, res, next) => {
@@ -881,7 +889,8 @@ const CRM_ENTITIES = /* @__PURE__ */ new Set([
   "automationRules",
   "salesBots",
   "savedFilters",
-  "settings"
+  "settings",
+  "followupSequences"
 ]);
 const INGEST_SECRET = (process.env.CRM_INGEST_SECRET || EVOLUTION_WEBHOOK_SECRET || "").trim();
 function onlyDigits(v) {
@@ -1217,6 +1226,11 @@ app.post("/api/crm/push", async (req, res) => {
         updated_by: req.authEmail || clientId,
         match_key: deleted ? null : matchKeyFor(entity, data)
       });
+    }
+    try {
+      await preserveFollowupProgress([...rows.values()]);
+    } catch (err) {
+      console.warn("[Follow-up] falha ao preservar andamento:", errorMessage(err));
     }
     try {
       await syncTasksToGoogle([...rows.values()], req.authEmail || "");
@@ -1733,6 +1747,242 @@ app.post("/api/disparos/registrar", async (req, res) => {
     return res.json({ ok: true, leadId: lead.id, criado: !found.leads[0] });
   } catch (err) {
     console.error("[Disparos registrar]", errorMessage(err));
+    return res.status(500).json({ error: errorMessage(err) });
+  }
+});
+// ==========================================
+// SEQUÊNCIAS DE FOLLOW-UP (ex.: pós-catálogo)
+// O andamento fica no lead (lead.followup). Um relógio (Supabase pg_cron) chama
+// /api/followup/tick a cada 15 minutos para enviar as mensagens que venceram.
+// ==========================================
+const FOLLOWUP_PER_TICK = 4;
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+const spFmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/Sao_Paulo", weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+const WD = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+function inSendWindow(janela, date = new Date()) {
+  const parts = Object.fromEntries(spFmt.formatToParts(date).map((p) => [p.type, p.value]));
+  const dia = WD[parts.weekday];
+  const hhmm = `${parts.hour}:${parts.minute}`;
+  const dias = Array.isArray(janela?.dias) && janela.dias.length ? janela.dias : [1, 2, 3, 4, 5, 6];
+  const inicio = janela?.inicio || "09:00";
+  const fim = janela?.fim || "19:00";
+  return dias.includes(dia) && hhmm >= inicio && hhmm < fim;
+}
+const addDaysIso = (iso, dias) => new Date(new Date(iso).getTime() + Number(dias || 0) * 864e5).toISOString();
+async function loadSequences() {
+  const rows = check(await db().from("crm_records").select("data").eq("entity", "followupSequences").eq("deleted", false), "ler sequências") || [];
+  return rows.map((r) => r.data).filter((s) => s && Array.isArray(s.passos) && s.passos.length);
+}
+async function saveLeadData(lead) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  lead.updatedAt = now;
+  check(await db().from("crm_records").upsert({
+    entity: "leads", id: lead.id, data: lead, deleted: false, updated_at: now, updated_by: "follow-up", match_key: matchKeyFor("leads", lead)
+  }, { onConflict: "entity,id" }), "gravar lead");
+}
+function newFollowup(seq, startIso, origem) {
+  return {
+    sequenceId: seq.id, sequenceNome: seq.nome, status: "ativo", origem, iniciadoEm: startIso,
+    passoAtual: 0, totalPassos: seq.passos.length, proximoEnvioEm: addDaysIso(startIso, seq.passos[0].diasApos),
+    historico: [], versao: Date.now()
+  };
+}
+async function ensureLeadForPhone(found, nome) {
+  if (found.leads[0]) return found.leads[0];
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const sb = db();
+  let contact = found.contacts[0];
+  if (!contact) {
+    contact = { id: `ct-${found.phone.key}`, nome: nome || found.phone.display, telefones: [found.phone.display], emails: [], tags: [], customFields: {}, canais: { whatsapp: found.phone.e164 }, consentimentoMarketing: false, createdAt: now, updatedAt: now };
+    check(await sb.from("crm_records").upsert({ entity: "contacts", id: contact.id, data: contact, deleted: false, updated_at: now, updated_by: "follow-up", match_key: matchKeyFor("contacts", contact) }, { onConflict: "entity,id" }), "criar contato");
+  }
+  const { first } = await stagesById();
+  const entry = first?.stages?.find((st) => st.tipo === "entrada");
+  return {
+    id: `fu-${found.phone.key}`, nome: contact.nome, valor: 0, pipelineId: first?.id || "pipe-vendas", stageId: entry?.id || "st-entrada",
+    responsavelId: "", contactIds: [contact.id], tags: [], origemId: "", customFields: {}, produtos: [], createdAt: now, updatedAt: now,
+    ultimaInteracaoAt: now, naoLidas: 0, rastreamento: { fonte: "WhatsApp" }
+  };
+}
+// Chamado pelo webhook a cada mensagem nova
+async function followupOnMessage(ev) {
+  if (!ev.phone) return;
+  const sequences = (await loadSequences()).filter((s) => s.ativo !== false);
+  if (!sequences.length) return;
+  if (ev.fromMe) {
+    if (ev.content?.tipo !== "arquivo") return;
+    const texto = normTxt(String(ev.content.conteudo || ""));
+    const seq = sequences.find((s) => s.gatilho?.tipo === "documento" && texto.includes(normTxt(s.gatilho.palavraChave || "catalogo")));
+    if (!seq) return;
+    const found = await findByPhone(ev.phone);
+    if (!found) return;
+    const lead = await ensureLeadForPhone(found);
+    const { map: stages } = await stagesById();
+    const tipo = stages.get(lead.stageId)?.tipo;
+    if (tipo === "ganho" || tipo === "perdido") return;
+    lead.followup = newFollowup(seq, ev.sentAt, "Catálogo enviado");
+    await saveLeadData(lead);
+    console.log(`[Follow-up] ${lead.id} entrou na sequência "${seq.nome}"`);
+    return;
+  }
+  // Mensagem do cliente: pausa as sequências ativas (se a sequência pedir)
+  const found = await findByPhone(ev.phone);
+  for (const lead of found?.leads || []) {
+    const f = lead.followup;
+    if (!f || f.status !== "ativo") continue;
+    const seq = sequences.find((s) => s.id === f.sequenceId);
+    if (seq && seq.pausarQuandoResponder === false) continue;
+    lead.followup = { ...f, status: "pausado", motivo: "Cliente respondeu", pausadoEm: (/* @__PURE__ */ new Date()).toISOString(), versao: Date.now() };
+    await saveLeadData(lead);
+    console.log(`[Follow-up] ${lead.id} pausado: cliente respondeu`);
+  }
+}
+// Não deixa uma edição antiga do navegador desfazer o andamento gravado pelo servidor
+async function preserveFollowupProgress(rows) {
+  const leadRows = rows.filter((r) => r.entity === "leads" && !r.deleted);
+  if (!leadRows.length) return;
+  const prev = check(await db().from("crm_records").select("id, data").eq("entity", "leads").in("id", leadRows.map((r) => r.id)), "ler leads anteriores") || [];
+  const prevById = new Map(prev.map((r) => [r.id, r.data]));
+  for (const row of leadRows) {
+    const old = prevById.get(row.id)?.followup;
+    if (!old) continue;
+    const incoming = row.data.followup;
+    if (!incoming || (incoming.versao || 0) < (old.versao || 0)) row.data.followup = old;
+  }
+}
+function renderTemplate(corpo, vars) {
+  return String(corpo || "").replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, k) => {
+    const v = vars[k.toLowerCase()];
+    return v === void 0 || v === null ? "" : String(v);
+  }).replace(/[ \t]+\n/g, "\n").trim();
+}
+async function leadContext(lead) {
+  const sb = db();
+  const cid = (lead.contactIds || [])[0];
+  const contact = cid ? check(await sb.from("crm_records").select("data").eq("entity", "contacts").eq("id", cid).maybeSingle(), "ler contato")?.data : null;
+  const company = lead.companyId ? check(await sb.from("crm_records").select("data").eq("entity", "companies").eq("id", lead.companyId).maybeSingle(), "ler empresa")?.data : null;
+  const nome = String(contact?.nome || lead.nome || "").trim();
+  const primeiro = nome.split(/\s+/)[0] || "";
+  const primeiroNome = primeiro ? primeiro[0].toUpperCase() + primeiro.slice(1).toLowerCase() : "";
+  const empresa = company?.nome || lead.nome || "";
+  const phone = brPhone((contact?.telefones || [])[0] || contact?.canais?.whatsapp);
+  return {
+    phone,
+    vars: {
+      primeiro_nome: primeiroNome, nome, empresa, segmento: lead.qualificacao?.segmento || "",
+      "contato.nome": nome, "contato.primeiro_nome": primeiroNome, "lead.nome": lead.nome, "empresa.nome": empresa
+    }
+  };
+}
+async function pickConversation(phone) {
+  const sb = db();
+  const ddd = phone.key.slice(2, 4), last8 = phone.key.slice(-8);
+  const convs = check(await sb.from("wa_conversations").select("*").like("phone", `55${ddd}%${last8}`).order("ultima_mensagem_at", { ascending: false }).limit(5), "buscar conversa") || [];
+  for (const c of convs) {
+    if (!(await isInstanceRemoved(c.instance_name))) return c;
+  }
+  // Sem conversa ainda: usa a conexão de WhatsApp ativa mais recente
+  const inst = check(await sb.from("wa_instances").select("instance_name, removido_em, last_event_at").order("last_event_at", { ascending: false }).limit(10), "ler conexões") || [];
+  const active = inst.find((i) => !i.removido_em);
+  if (!active) return null;
+  const remoteJid = `${phone.e164.replace(/\D/g, "")}@s.whatsapp.net`;
+  return { id: conversationIdFor(active.instance_name, remoteJid), instance_name: active.instance_name, remote_jid: remoteJid, phone: phone.e164.replace(/\D/g, ""), novo: true };
+}
+async function sendFollowupMessage(conv, text, contactName) {
+  const sb = db();
+  const sent = await evo(`/message/sendText/${enc(conv.instance_name)}`, { method: "POST", body: { number: conv.phone || conv.remote_jid, text, delay: 1500 } });
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const messageId = sent?.key?.id || `fu-${Date.now()}`;
+  if (conv.novo) {
+    check(await sb.from("wa_conversations").upsert({ id: conv.id, instance_name: conv.instance_name, remote_jid: conv.remote_jid, phone: conv.phone, contact_name: contactName || null, nao_lidas: 0, criar_lead: false, updated_at: now }, { onConflict: "id" }), "criar conversa");
+  }
+  check(await sb.from("wa_messages").upsert({ id: messageId, conversation_id: conv.id, from_me: true, tipo: "texto", conteudo: text, status: mapStatus(sent?.status) || "enviada", enviada_at: now, updated_at: now }, { onConflict: "id" }), "gravar mensagem do follow-up");
+  check(await sb.from("wa_conversations").update({ ultima_mensagem: text, ultima_mensagem_at: now, updated_at: now }).eq("id", conv.id), "atualizar conversa");
+  return messageId;
+}
+async function runFollowupTick() {
+  const sb = db();
+  const sequences = await loadSequences();
+  const seqById = new Map(sequences.map((s) => [s.id, s]));
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const due = check(await sb.from("crm_records").select("id, data").eq("entity", "leads").eq("deleted", false)
+    .eq("data->followup->>status", "ativo").lte("data->followup->>proximoEnvioEm", nowIso)
+    .order("data->followup->>proximoEnvioEm", { ascending: true }).limit(30), "buscar follow-ups vencidos") || [];
+  if (!due.length) return { vencidos: 0, enviados: 0, detalhes: [] };
+  const { map: stages } = await stagesById();
+  const tagNames = await tagNamesById();
+  const tplRows = check(await sb.from("crm_records").select("id, data").eq("entity", "messageTemplates").eq("deleted", false), "ler modelos") || [];
+  const templates = new Map(tplRows.map((r) => [r.id, r.data]));
+  const detalhes = [];
+  let enviados = 0;
+  for (const row of due) {
+    if (enviados >= FOLLOWUP_PER_TICK) break;
+    const lead = row.data;
+    const f = lead.followup;
+    const seq = seqById.get(f.sequenceId);
+    const finish = async (status, motivo) => {
+      lead.followup = { ...f, status, motivo, encerradoEm: (/* @__PURE__ */ new Date()).toISOString(), versao: Date.now() };
+      await saveLeadData(lead);
+      detalhes.push({ lead: lead.id, status, motivo });
+    };
+    try {
+      if (!seq || seq.ativo === false) { await finish("encerrado", "Sequência desativada ou removida"); continue; }
+      const tipo = stages.get(lead.stageId)?.tipo;
+      if (tipo === "ganho") { await finish("encerrado", "Lead virou venda ganha"); continue; }
+      if (tipo === "perdido") { await finish("encerrado", "Lead perdido"); continue; }
+      const nomesTags = (lead.tags || []).map((t) => normTxt(tagNames.get(t) || t));
+      if (nomesTags.some((n) => BLOCK_TAGS.includes(n))) { await finish("encerrado", "Etiqueta de não enviar"); continue; }
+      const step = seq.passos[f.passoAtual];
+      if (!step) { await finish("concluido", "Sequência concluída"); continue; }
+      if (!inSendWindow(seq.janela)) { detalhes.push({ lead: lead.id, status: "aguardando", motivo: "fora do horário de envio" }); continue; }
+      const tpl = templates.get(step.templateId);
+      if (!tpl || !String(tpl.corpo || "").trim()) { await finish("pausado", "Modelo de mensagem não encontrado"); continue; }
+      const ctx = await leadContext(lead);
+      if (!ctx.phone) { await finish("pausado", "Lead sem telefone"); continue; }
+      const conv = await pickConversation(ctx.phone);
+      if (!conv) { await finish("pausado", "Nenhuma conexão de WhatsApp ativa"); continue; }
+      // Segurança: se o cliente respondeu depois do início e a sequência pausa ao responder, não envia
+      if (seq.pausarQuandoResponder !== false && !conv.novo) {
+        const last = check(await sb.from("wa_messages").select("enviada_at").eq("conversation_id", conv.id).eq("from_me", false)
+          .order("enviada_at", { ascending: false }).limit(1), "ler última do cliente") || [];
+        const ultimaCliente = last[0]?.enviada_at;
+        const referencia = f.retomadoEm || f.iniciadoEm;
+        if (ultimaCliente && new Date(ultimaCliente).getTime() > new Date(referencia).getTime()) { await finish("pausado", "Cliente respondeu"); continue; }
+      }
+      const texto = renderTemplate(tpl.corpo, ctx.vars);
+      if (enviados > 0) await sleepMs(4e3 + Math.floor(Math.random() * 4e3));
+      const messageId = await sendFollowupMessage(conv, texto, ctx.vars.nome);
+      const proximo = seq.passos[f.passoAtual + 1];
+      const historico = [...(f.historico || []), { passo: f.passoAtual + 1, enviadoEm: (/* @__PURE__ */ new Date()).toISOString(), messageId, templateId: step.templateId }];
+      let proximoEnvioEm = null;
+      if (proximo) {
+        const agendado = addDaysIso(f.iniciadoEm, proximo.diasApos);
+        proximoEnvioEm = new Date(agendado).getTime() > Date.now() ? agendado : addDaysIso((/* @__PURE__ */ new Date()).toISOString(), 1);
+      }
+      lead.followup = {
+        ...f, historico, passoAtual: f.passoAtual + 1, proximoEnvioEm,
+        status: proximo ? "ativo" : "concluido", motivo: proximo ? void 0 : "Sequência concluída", versao: Date.now()
+      };
+      lead.ultimaInteracaoAt = (/* @__PURE__ */ new Date()).toISOString();
+      await saveLeadData(lead);
+      enviados++;
+      detalhes.push({ lead: lead.id, status: "enviado", passo: f.passoAtual + 1 });
+    } catch (err) {
+      console.warn(`[Follow-up] ${lead.id}:`, errorMessage(err));
+      detalhes.push({ lead: lead.id, status: "erro", motivo: errorMessage(err) });
+    }
+  }
+  return { vencidos: due.length, enviados, detalhes };
+}
+// Relógio: chamado pelo Supabase (pg_cron) a cada 15 minutos
+app.post("/api/followup/tick", async (req, res) => {
+  if (!ingestAuthorized(req)) return res.status(401).json({ error: "Segredo inválido (x-ingest-secret)." });
+  try {
+    const result = await runFollowupTick();
+    if (result.enviados) console.log(`[Follow-up] ${result.enviados} mensagem(ns) enviada(s)`);
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error("[Follow-up tick]", errorMessage(err));
     return res.status(500).json({ error: errorMessage(err) });
   }
 });

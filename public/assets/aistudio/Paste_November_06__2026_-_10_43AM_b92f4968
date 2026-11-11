@@ -1,0 +1,655 @@
+FOLLOW-UP AUTOMÁTICO (parte C de 3 — telas): aba Follow-up em Configurações, botão Editar nos Modelos de Mensagem e quadro de follow-up (Pausar, Retomar, Encerrar, Iniciar) no card do lead.
+
+REGRAS (obrigatórias):
+- Use EXATAMENTE o código abaixo, caractere por caractere. Não resuma, não reescreva, não "melhore", não converta de linguagem e não renomeie nada.
+- Não crie colunas, tabelas ou campos que não estejam no código abaixo.
+- Não altere nenhum outro arquivo nem outras partes dos arquivos citados.
+- Cada TRECHO ATUAL aparece uma única vez no arquivo: substitua exatamente ele pelo TRECHO NOVO.
+- Arquivos marcados como CRIAR: crie com o conteúdo completo (ou substitua todo o conteúdo, se já existir).
+- Ao terminar, responda apenas com a lista do que foi alterado.
+
+----------------------------------------------------------------
+ALTERAÇÃO 1 — CRIAR src/modules/configuracoes/FollowupSettings.tsx:
+
+===== INÍCIO DO src/modules/configuracoes/FollowupSettings.tsx =====
+import React, { useEffect, useMemo, useState } from 'react';
+import { Plus, Trash2, Save, Repeat, ArrowDown } from 'lucide-react';
+import { useStore } from '../../store/useStore';
+import { Button } from '../../components/ui/Button';
+import { confirmDialog } from '../../components/ui/ConfirmDialog';
+import { FollowupSequence } from '../../types';
+
+const DIAS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+const EXEMPLO: Record<string, string> = {
+  primeiro_nome: 'Mário', nome: 'Mário Souza', empresa: 'UP Cafeteria', segmento: 'Cafeteria',
+  'contato.nome': 'Mário Souza', 'contato.primeiro_nome': 'Mário', 'lead.nome': 'UP Cafeteria', 'empresa.nome': 'UP Cafeteria',
+};
+const preview = (corpo: string) => corpo.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, k) => EXEMPLO[String(k).toLowerCase()] ?? '');
+
+const novaSequencia = (): FollowupSequence => ({
+  id: `seq-${Date.now()}`,
+  nome: 'Nova sequência',
+  ativo: true,
+  gatilho: { tipo: 'manual' },
+  pausarQuandoResponder: true,
+  janela: { dias: [1, 2, 3, 4, 5, 6], inicio: '09:00', fim: '19:00' },
+  passos: [],
+});
+
+// Configurações > Follow-up: sequências de mensagens automáticas
+export const FollowupSettings: React.FC<{ onEditTemplates?: () => void }> = ({ onEditTemplates }) => {
+  const { followupSequences, saveFollowupSequence, deleteFollowupSequence, messageTemplates, leads, addToast } = useStore();
+  const [selectedId, setSelectedId] = useState<string | null>(followupSequences[0]?.id || null);
+  const [draft, setDraft] = useState<FollowupSequence | null>(null);
+  const [dirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    if (!selectedId && followupSequences[0]) setSelectedId(followupSequences[0].id);
+  }, [followupSequences, selectedId]);
+
+  // Troca de sequência: carrega a escolhida
+  useEffect(() => {
+    const seq = followupSequences.find(s => s.id === selectedId);
+    setDraft(seq ? JSON.parse(JSON.stringify(seq)) : null);
+    setDirty(false);
+  }, [selectedId]);
+
+  // Atualização automática (a cada 15 s): só recarrega se não houver edição em andamento
+  useEffect(() => {
+    if (dirty) return;
+    const seq = followupSequences.find(s => s.id === selectedId);
+    setDraft(seq ? JSON.parse(JSON.stringify(seq)) : null);
+  }, [followupSequences]);
+
+  const ativosPorSequencia = useMemo(() => {
+    const m = new Map<string, number>();
+    leads.forEach(l => { if (l.followup?.status === 'ativo') m.set(l.followup.sequenceId, (m.get(l.followup.sequenceId) || 0) + 1); });
+    return m;
+  }, [leads]);
+
+  const update = (patch: Partial<FollowupSequence>) => { setDirty(true); setDraft(d => (d ? { ...d, ...patch } : d)); };
+  const updateStep = (i: number, patch: Partial<FollowupSequence['passos'][number]>) => {
+    setDirty(true);
+    setDraft(d => (d ? { ...d, passos: d.passos.map((p, idx) => (idx === i ? { ...p, ...patch } : p)) } : d));
+  };
+
+  const salvar = () => {
+    if (!draft) return;
+    if (!draft.nome.trim()) { addToast('Dê um nome à sequência', '', 'error'); return; }
+    if (draft.passos.some(p => !p.templateId)) { addToast('Escolha o modelo de cada passo', '', 'error'); return; }
+    if (draft.gatilho.tipo === 'documento' && !draft.gatilho.palavraChave?.trim()) { addToast('Informe a palavra do nome do documento', '', 'error'); return; }
+    const passos = [...draft.passos].sort((a, b) => a.diasApos - b.diasApos);
+    saveFollowupSequence({ ...draft, nome: draft.nome.trim(), passos });
+    setDirty(false);
+    addToast('Sequência salva', draft.nome, 'success');
+  };
+
+  const excluir = async () => {
+    if (!draft) return;
+    const emAndamento = ativosPorSequencia.get(draft.id) || 0;
+    const ok = await confirmDialog({
+      title: `Excluir a sequência "${draft.nome}"?`,
+      message: emAndamento ? `${emAndamento} lead(s) estão nela agora e vão parar de receber as mensagens.` : undefined,
+    });
+    if (!ok) return;
+    deleteFollowupSequence(draft.id);
+    setSelectedId(null);
+  };
+
+  const criar = () => {
+    const seq = novaSequencia();
+    saveFollowupSequence(seq);
+    setSelectedId(seq.id);
+  };
+
+  const inputCls = 'px-3 py-2 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-slate-100 outline-none focus:border-indigo-500';
+
+  return (
+    <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm p-6 flex flex-col gap-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">Sequências de follow-up</h3>
+          <p className="text-xs text-slate-500 max-w-2xl">
+            Mensagens automáticas enviadas pelo WhatsApp em dias definidos. O texto de cada passo vem de um modelo em
+            "Modelos de Mensagem": editou o modelo, as próximas mensagens já saem com o texto novo. A sequência para sozinha
+            quando o lead vira venda ganha ou perdida, ou recebe a etiqueta "Não enviar disparo".
+          </p>
+        </div>
+        <Button size="sm" onClick={criar} className="gap-1.5"><Plus className="w-4 h-4" /> Nova sequência</Button>
+      </div>
+
+      {followupSequences.length === 0 ? (
+        <p className="text-xs text-slate-400 py-8 text-center">Nenhuma sequência ainda.</p>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {followupSequences.map(s => (
+            <button
+              key={s.id}
+              type="button"
+              onClick={async () => {
+                if (dirty && s.id !== selectedId && !(await confirmDialog({ title: 'Descartar as alterações não salvas?', confirmLabel: 'Descartar' }))) return;
+                setSelectedId(s.id);
+              }}
+              className={`px-3 py-2 rounded-xl border text-xs text-left ${selectedId === s.id ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-950/40' : 'border-slate-200 dark:border-slate-800'}`}
+            >
+              <span className="flex items-center gap-1.5 font-semibold text-slate-900 dark:text-slate-100">
+                <Repeat className="w-3.5 h-3.5" /> {s.nome}
+                {!s.ativo && <span className="text-[10px] text-slate-400 font-normal">(desativada)</span>}
+              </span>
+              <span className="text-[11px] text-slate-500">{s.passos.length} mensagens · {ativosPorSequencia.get(s.id) || 0} lead(s) em andamento</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {draft && (
+        <div className="space-y-5 border-t border-slate-100 dark:border-slate-800 pt-5">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <label className="text-xs text-slate-600 dark:text-slate-300 space-y-1">
+              <span className="font-semibold">Nome</span>
+              <input value={draft.nome} onChange={(e) => update({ nome: e.target.value })} className={`w-full ${inputCls}`} />
+            </label>
+            <div className="flex flex-col gap-2 text-xs text-slate-600 dark:text-slate-300">
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={draft.ativo} onChange={(e) => update({ ativo: e.target.checked })} />
+                Sequência ativa (desativada, nenhuma mensagem sai)
+              </label>
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={draft.pausarQuandoResponder} onChange={(e) => update({ pausarQuandoResponder: e.target.checked })} />
+                Pausar quando o cliente responder (a equipe assume a conversa)
+              </label>
+            </div>
+          </div>
+
+          <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 space-y-3 text-xs text-slate-600 dark:text-slate-300">
+            <p className="font-semibold">Como o lead entra na sequência</p>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={draft.gatilho.tipo === 'documento'}
+                onChange={(e) => update({ gatilho: e.target.checked ? { tipo: 'documento', palavraChave: draft.gatilho.palavraChave || 'catálogo' } : { tipo: 'manual' } })}
+              />
+              Automaticamente, quando a equipe enviar um documento cujo nome contém:
+              <input
+                value={draft.gatilho.palavraChave || ''}
+                disabled={draft.gatilho.tipo !== 'documento'}
+                onChange={(e) => update({ gatilho: { tipo: 'documento', palavraChave: e.target.value } })}
+                className={`w-40 ${inputCls}`}
+                placeholder="catálogo"
+              />
+            </label>
+            <p className="text-[11px] text-slate-500">Também dá para iniciar à mão no card do lead, com o botão "Iniciar follow-up".</p>
+          </div>
+
+          <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 space-y-3 text-xs text-slate-600 dark:text-slate-300">
+            <p className="font-semibold">Quando as mensagens podem sair (horário de Brasília)</p>
+            <div className="flex flex-wrap items-center gap-2">
+              {DIAS.map((d, i) => {
+                const on = draft.janela.dias.includes(i);
+                return (
+                  <button key={d} type="button"
+                    onClick={() => update({ janela: { ...draft.janela, dias: on ? draft.janela.dias.filter(x => x !== i) : [...draft.janela.dias, i].sort() } })}
+                    className={`px-2.5 py-1 rounded-lg border ${on ? 'border-indigo-500 bg-indigo-600 text-white' : 'border-slate-300 dark:border-slate-700'}`}>
+                    {d}
+                  </button>
+                );
+              })}
+              <span className="ml-2">das</span>
+              <input type="time" value={draft.janela.inicio} onChange={(e) => update({ janela: { ...draft.janela, inicio: e.target.value } })} className={inputCls} />
+              <span>às</span>
+              <input type="time" value={draft.janela.fim} onChange={(e) => update({ janela: { ...draft.janela, fim: e.target.value } })} className={inputCls} />
+            </div>
+            <p className="text-[11px] text-slate-500">Se a mensagem vencer fora desse horário, ela sai no próximo horário permitido.</p>
+          </div>
+
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">Mensagens da sequência</p>
+              {onEditTemplates && (
+                <button type="button" onClick={onEditTemplates} className="text-[11px] text-indigo-600 hover:underline">Editar textos em Modelos de Mensagem</button>
+              )}
+            </div>
+            {draft.passos.length === 0 && <p className="text-xs text-slate-400">Nenhuma mensagem. Adicione o primeiro passo.</p>}
+            {draft.passos.map((p, i) => {
+              const tpl = messageTemplates.find(t => t.id === p.templateId);
+              return (
+                <div key={p.id}>
+                  {i > 0 && <ArrowDown className="w-3.5 h-3.5 text-slate-400 mx-auto mb-2" />}
+                  <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 space-y-2">
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+                      <span className="font-semibold text-slate-900 dark:text-slate-100">Mensagem {i + 1}:</span>
+                      <input type="number" min={0} value={p.diasApos} onChange={(e) => updateStep(i, { diasApos: Math.max(0, Number(e.target.value) || 0) })} className={`w-16 ${inputCls}`} />
+                      <span>dias depois do início, usando o modelo</span>
+                      <select value={p.templateId} onChange={(e) => updateStep(i, { templateId: e.target.value })} className={`flex-1 min-w-[180px] ${inputCls}`}>
+                        <option value="">Escolha um modelo…</option>
+                        {messageTemplates.map(t => <option key={t.id} value={t.id}>{t.nome}</option>)}
+                      </select>
+                      <button type="button" aria-label="Remover passo" onClick={() => update({ passos: draft.passos.filter((_, idx) => idx !== i) })} className="p-1.5 text-slate-400 hover:text-red-500">
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                    {tpl && <p className="text-[11px] text-slate-500 whitespace-pre-line bg-slate-50 dark:bg-slate-800/50 rounded-lg p-2">Exemplo: {preview(tpl.corpo)}</p>}
+                  </div>
+                </div>
+              );
+            })}
+            <Button size="sm" variant="outline" className="gap-1.5"
+              onClick={() => update({ passos: [...draft.passos, { id: `p-${Date.now()}`, diasApos: (draft.passos[draft.passos.length - 1]?.diasApos || 0) + 3, templateId: '' }] })}>
+              <Plus className="w-4 h-4" /> Adicionar mensagem
+            </Button>
+          </div>
+
+          {dirty && <p className="text-[11px] text-amber-600">Há alterações não salvas.</p>}
+          <div className="flex justify-between pt-2 border-t border-slate-100 dark:border-slate-800">
+            <button type="button" onClick={excluir} className="text-xs text-red-500 hover:underline flex items-center gap-1"><Trash2 className="w-3.5 h-3.5" /> Excluir sequência</button>
+            <Button size="sm" onClick={salvar} className="gap-1.5"><Save className="w-4 h-4" /> Salvar sequência</Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+===== FIM DO src/modules/configuracoes/FollowupSettings.tsx =====
+
+----------------------------------------------------------------
+ALTERAÇÃO 2 — CRIAR src/modules/leads/LeadFollowupBox.tsx:
+
+===== INÍCIO DO src/modules/leads/LeadFollowupBox.tsx =====
+import React, { useState } from 'react';
+import { Repeat, Pause, Play, Square, Send } from 'lucide-react';
+import { useStore } from '../../store/useStore';
+import { Lead } from '../../types';
+import { confirmDialog } from '../../components/ui/ConfirmDialog';
+
+const fmt = (iso?: string | null) =>
+  iso ? new Date(iso).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
+
+const STATUS: Record<string, { label: string; cls: string }> = {
+  ativo: { label: 'Em andamento', cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300' },
+  pausado: { label: 'Pausado', cls: 'bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300' },
+  concluido: { label: 'Concluído', cls: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300' },
+  encerrado: { label: 'Encerrado', cls: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300' },
+};
+
+// Card do lead: situação do follow-up automático e botões de controle
+export const LeadFollowupBox: React.FC<{ lead: Lead }> = ({ lead }) => {
+  const { followupSequences, startFollowup, pauseFollowup, resumeFollowup, stopFollowup } = useStore();
+  const ativas = followupSequences.filter(s => s.ativo && s.passos.length > 0);
+  const [escolhida, setEscolhida] = useState(ativas[0]?.id || '');
+  const f = lead.followup;
+  const st = f ? STATUS[f.status] : null;
+  const btn = 'flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border';
+
+  return (
+    <div className="space-y-2">
+      <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+        <Repeat className="w-3.5 h-3.5" /> Follow-up automático
+      </h4>
+      <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-800 text-xs space-y-2">
+        {f && st ? (
+          <>
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-semibold text-slate-900 dark:text-slate-100 truncate">{f.sequenceNome || 'Sequência'}</span>
+              <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${st.cls}`}>{st.label}</span>
+            </div>
+            <div className="text-slate-600 dark:text-slate-300 space-y-0.5">
+              <p>Mensagens enviadas: <strong>{f.historico?.length || 0} de {f.totalPassos}</strong></p>
+              {f.status === 'ativo' && <p>Próximo envio: <strong>{fmt(f.proximoEnvioEm)}</strong></p>}
+              {f.motivo && f.status !== 'ativo' && <p className="text-slate-500">{f.motivo}{f.pausadoEm && f.status === 'pausado' ? ` · ${fmt(f.pausadoEm)}` : ''}</p>}
+              <p className="text-slate-400">Início: {fmt(f.iniciadoEm)}{f.origem ? ` · ${f.origem}` : ''}</p>
+            </div>
+            {f.historico?.length > 0 && (
+              <ul className="space-y-0.5 text-[11px] text-slate-500">
+                {f.historico.map(h => (
+                  <li key={`${h.passo}-${h.enviadoEm}`} className="flex items-center gap-1"><Send className="w-3 h-3" /> Mensagem {h.passo} enviada em {fmt(h.enviadoEm)}</li>
+                ))}
+              </ul>
+            )}
+            <div className="flex flex-wrap gap-2 pt-1">
+              {f.status === 'ativo' && (
+                <button type="button" onClick={() => pauseFollowup(lead.id)} className={`${btn} border-amber-300 text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-950/40`}>
+                  <Pause className="w-3.5 h-3.5" /> Pausar
+                </button>
+              )}
+              {f.status === 'pausado' && (
+                <button type="button" onClick={() => resumeFollowup(lead.id)} className={`${btn} border-emerald-300 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950/40`}>
+                  <Play className="w-3.5 h-3.5" /> Retomar
+                </button>
+              )}
+              {(f.status === 'ativo' || f.status === 'pausado') && (
+                <button
+                  type="button"
+                  onClick={async () => { if (await confirmDialog({ title: 'Encerrar o follow-up deste lead?', message: 'Nenhuma outra mensagem da sequência será enviada.', confirmLabel: 'Encerrar' })) stopFollowup(lead.id); }}
+                  className={`${btn} border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800`}
+                >
+                  <Square className="w-3.5 h-3.5" /> Encerrar
+                </button>
+              )}
+              {(f.status === 'concluido' || f.status === 'encerrado') && ativas.length > 0 && (
+                <button type="button" onClick={() => startFollowup(lead.id, f.sequenceId)} className={`${btn} border-indigo-300 text-indigo-600 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-950/40`}>
+                  <Play className="w-3.5 h-3.5" /> Recomeçar
+                </button>
+              )}
+            </div>
+          </>
+        ) : ativas.length === 0 ? (
+          <p className="text-slate-400">Nenhuma sequência ativa. Crie em Configurações &gt; Follow-up.</p>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-slate-500">Este lead não está em nenhuma sequência. Ele entra sozinho quando o catálogo é enviado, ou você pode iniciar agora:</p>
+            <div className="flex gap-2">
+              <select value={escolhida} onChange={(e) => setEscolhida(e.target.value)}
+                className="flex-1 px-2 py-1.5 text-xs bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-slate-100 outline-none">
+                {ativas.map(s => <option key={s.id} value={s.id}>{s.nome}</option>)}
+              </select>
+              <button type="button" disabled={!escolhida} onClick={() => startFollowup(lead.id, escolhida)}
+                className={`${btn} border-indigo-500 bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50`}>
+                <Play className="w-3.5 h-3.5" /> Iniciar follow-up
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+===== FIM DO src/modules/leads/LeadFollowupBox.tsx =====
+
+----------------------------------------------------------------
+ALTERAÇÃO 3 — src/modules/configuracoes/ConfiguracoesPage.tsx: substituir
+
+===== TRECHO ATUAL (REMOVER) =====
+import { TagsSettings } from './TagsSettings';
+import { IntegracoesSettings } from './IntegracoesSettings';
+
+export const ConfiguracoesPage: React.FC = () => {
+  const { 
+    messageTemplates, addMessageTemplate, deleteMessageTemplate, 
+    emailTemplates, addEmailTemplate, deleteEmailTemplate, 
+    restoreSeed, clearAllData, clearAllDataCompletely, tags 
+  } = useStore();
+  const [tab, setTab] = useState<'etiquetas' | 'integracoes' | 'templates' | 'email_templates'>(
+    () => (new URLSearchParams(window.location.search).get('google') ? 'integracoes' : 'etiquetas')
+  );
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  
+  // New template modal
+  const [modalOpen, setModalOpen] = useState(false);
+  const [tplNome, setTplNome] = useState('');
+  const [tplCanal, setTplCanal] = useState('whatsapp');
+  const [tplCorpo, setTplCorpo] = useState('');
+
+  // New email template modal
+  const [emailModalOpen, setEmailModalOpen] = useState(false);
+  const [etplNome, setEtplNome] = useState('');
+  const [etplAssunto, setEtplAssunto] = useState('');
+  const [etplCorpo, setEtplCorpo] = useState('');
+
+  const handleCreateTemplate = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!tplNome.trim() || !tplCorpo.trim()) return;
+    addMessageTemplate({
+      nome: tplNome,
+      canal: tplCanal,
+      corpo: tplCorpo,
+      variaveis: ['contato.nome', 'usuario.nome', 'lead.nome']
+    });
+    setTplNome('');
+    setTplCorpo('');
+    setModalOpen(false);
+  };
+
+  const handleCreateEmailTemplate = (e: React.FormEvent) => {
+===== FIM DO TRECHO ATUAL =====
+
+por:
+
+===== TRECHO NOVO =====
+import { TagsSettings } from './TagsSettings';
+import { IntegracoesSettings } from './IntegracoesSettings';
+import { FollowupSettings } from './FollowupSettings';
+
+export const ConfiguracoesPage: React.FC = () => {
+  const { 
+    messageTemplates, addMessageTemplate, deleteMessageTemplate, updateMessageTemplate, followupSequences, 
+    emailTemplates, addEmailTemplate, deleteEmailTemplate, 
+    restoreSeed, clearAllData, clearAllDataCompletely, tags 
+  } = useStore();
+  const [tab, setTab] = useState<'etiquetas' | 'integracoes' | 'followup' | 'templates' | 'email_templates'>(
+    () => (new URLSearchParams(window.location.search).get('google') ? 'integracoes' : 'etiquetas')
+  );
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  
+  // New template modal
+  const [modalOpen, setModalOpen] = useState(false);
+  const [tplNome, setTplNome] = useState('');
+  const [tplCanal, setTplCanal] = useState('whatsapp');
+  const [tplCorpo, setTplCorpo] = useState('');
+  const [editingTplId, setEditingTplId] = useState<string | null>(null);
+
+  // New email template modal
+  const [emailModalOpen, setEmailModalOpen] = useState(false);
+  const [etplNome, setEtplNome] = useState('');
+  const [etplAssunto, setEtplAssunto] = useState('');
+  const [etplCorpo, setEtplCorpo] = useState('');
+
+  const handleCreateTemplate = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!tplNome.trim() || !tplCorpo.trim()) return;
+    if (editingTplId) {
+      updateMessageTemplate(editingTplId, { nome: tplNome, canal: tplCanal, corpo: tplCorpo });
+    } else {
+      addMessageTemplate({ nome: tplNome, canal: tplCanal, corpo: tplCorpo, variaveis: [] });
+    }
+    setTplNome('');
+    setTplCorpo('');
+    setEditingTplId(null);
+    setModalOpen(false);
+  };
+
+  const openEditTemplate = (tpl: { id: string; nome: string; canal: string; corpo: string }) => {
+    setEditingTplId(tpl.id);
+    setTplNome(tpl.nome);
+    setTplCanal(tpl.canal || 'whatsapp');
+    setTplCorpo(tpl.corpo);
+    setModalOpen(true);
+  };
+
+  // Em quais sequências de follow-up cada modelo é usado
+  const usoNosFollowups = (tplId: string) =>
+    followupSequences.flatMap(sq => sq.passos.map((p, i) => (p.templateId === tplId ? `${sq.nome} (mensagem ${i + 1})` : null)).filter(Boolean) as string[]);
+
+  const handleCreateEmailTemplate = (e: React.FormEvent) => {
+===== FIM DO TRECHO NOVO =====
+
+----------------------------------------------------------------
+ALTERAÇÃO 4 — src/modules/configuracoes/ConfiguracoesPage.tsx: substituir
+
+===== TRECHO ATUAL (REMOVER) =====
+          { id: 'etiquetas', label: 'Etiquetas', badge: tags.length },
+          { id: 'integracoes', label: 'Integrações' },
+          { id: 'templates', label: 'Modelos de Mensagem', badge: messageTemplates.length },
+          { id: 'email_templates', label: 'Modelos de E-mail', badge: emailTemplates.length },
+        ]}
+        activeTab={tab}
+        onChange={(id) => setTab(id as any)}
+        className="mb-6"
+      />
+
+      {tab === 'etiquetas' && <TagsSettings />}
+
+      {tab === 'integracoes' && <IntegracoesSettings />}
+
+      {tab === 'templates' && (
+        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm p-6 flex flex-col flex-1">
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">Modelos para o Compositor (Atalho "/")</h3>
+              <p className="text-xs text-slate-500">Crie modelos com variáveis preenchidas automaticamente (ex: <code className="text-indigo-600">{'{{contato.nome}}'}</code>).</p>
+            </div>
+            <Button size="sm" onClick={() => setModalOpen(true)} className="gap-2">
+              <Plus className="w-4 h-4" /> Novo Modelo
+            </Button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {messageTemplates.map(tpl => (
+              <div key={tpl.id} className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50 flex flex-col justify-between">
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="font-bold text-sm text-slate-900 dark:text-slate-100">{tpl.nome}</h4>
+                    <span className="px-2 py-0.5 rounded text-[10px] uppercase font-semibold bg-indigo-100 text-indigo-700">{tpl.canal}</span>
+                  </div>
+                  <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed mb-4">{tpl.corpo}</p>
+                </div>
+                <div className="flex justify-end pt-2 border-t border-slate-200 dark:border-slate-700">
+                  <button 
+                    onClick={() => deleteMessageTemplate(tpl.id)}
+===== FIM DO TRECHO ATUAL =====
+
+por:
+
+===== TRECHO NOVO =====
+          { id: 'etiquetas', label: 'Etiquetas', badge: tags.length },
+          { id: 'integracoes', label: 'Integrações' },
+          { id: 'followup', label: 'Follow-up', badge: followupSequences.length },
+          { id: 'templates', label: 'Modelos de Mensagem', badge: messageTemplates.length },
+          { id: 'email_templates', label: 'Modelos de E-mail', badge: emailTemplates.length },
+        ]}
+        activeTab={tab}
+        onChange={(id) => setTab(id as any)}
+        className="mb-6"
+      />
+
+      {tab === 'etiquetas' && <TagsSettings />}
+
+      {tab === 'integracoes' && <IntegracoesSettings />}
+
+      {tab === 'followup' && <FollowupSettings onEditTemplates={() => setTab('templates')} />}
+
+      {tab === 'templates' && (
+        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm p-6 flex flex-col flex-1">
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">Modelos para o Compositor (Atalho "/")</h3>
+              <p className="text-xs text-slate-500">Crie modelos com variáveis preenchidas automaticamente (ex: <code className="text-indigo-600">{'{{contato.nome}}'}</code>).</p>
+            </div>
+            <Button size="sm" onClick={() => { setEditingTplId(null); setTplNome(''); setTplCorpo(''); setModalOpen(true); }} className="gap-2">
+              <Plus className="w-4 h-4" /> Novo Modelo
+            </Button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {messageTemplates.map(tpl => (
+              <div key={tpl.id} className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50 flex flex-col justify-between">
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="font-bold text-sm text-slate-900 dark:text-slate-100">{tpl.nome}</h4>
+                    <span className="px-2 py-0.5 rounded text-[10px] uppercase font-semibold bg-indigo-100 text-indigo-700">{tpl.canal}</span>
+                  </div>
+                  <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed mb-2 whitespace-pre-line">{tpl.corpo}</p>
+                  {usoNosFollowups(tpl.id).length > 0 && (
+                    <p className="text-[11px] text-indigo-600 dark:text-indigo-400 mb-3">Usado em: {usoNosFollowups(tpl.id).join(', ')}</p>
+                  )}
+                </div>
+                <div className="flex justify-end gap-4 pt-2 border-t border-slate-200 dark:border-slate-700">
+                  <button
+                    onClick={() => openEditTemplate(tpl)}
+                    className="text-xs text-indigo-600 hover:underline"
+                  >
+                    Editar
+                  </button>
+                  <button 
+                    onClick={() => deleteMessageTemplate(tpl.id)}
+===== FIM DO TRECHO NOVO =====
+
+----------------------------------------------------------------
+ALTERAÇÃO 5 — src/modules/configuracoes/ConfiguracoesPage.tsx: substituir
+
+===== TRECHO ATUAL (REMOVER) =====
+
+      {/* New Template Modal */}
+      <Modal isOpen={modalOpen} onClose={() => setModalOpen(false)} title="Criar Novo Modelo de Mensagem">
+        <form onSubmit={handleCreateTemplate} className="space-y-4">
+          <div>
+===== FIM DO TRECHO ATUAL =====
+
+por:
+
+===== TRECHO NOVO =====
+
+      {/* New Template Modal */}
+      <Modal isOpen={modalOpen} onClose={() => { setModalOpen(false); setEditingTplId(null); }} title={editingTplId ? 'Editar Modelo de Mensagem' : 'Criar Novo Modelo de Mensagem'}>
+        <form onSubmit={handleCreateTemplate} className="space-y-4">
+          <div>
+===== FIM DO TRECHO NOVO =====
+
+----------------------------------------------------------------
+ALTERAÇÃO 6 — src/modules/configuracoes/ConfiguracoesPage.tsx: substituir
+
+===== TRECHO ATUAL (REMOVER) =====
+
+          <div>
+            <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">Corpo da Mensagem (com variáveis <code className="text-indigo-600">{'{{contato.nome}}'}</code>) *</label>
+            <textarea
+              rows={4}
+              required
+              placeholder="Olá {{contato.nome}}, ..."
+===== FIM DO TRECHO ATUAL =====
+
+por:
+
+===== TRECHO NOVO =====
+
+          <div>
+            <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">Corpo da Mensagem *</label>
+            <p className="text-[11px] text-slate-500 mb-1">
+              Variáveis: <code className="text-indigo-600">{'{{primeiro_nome}}'}</code>, <code className="text-indigo-600">{'{{nome}}'}</code>, <code className="text-indigo-600">{'{{empresa}}'}</code>, <code className="text-indigo-600">{'{{segmento}}'}</code>
+            </p>
+            <textarea
+              rows={7}
+              required
+              placeholder="Olá {{contato.nome}}, ..."
+===== FIM DO TRECHO NOVO =====
+
+----------------------------------------------------------------
+ALTERAÇÃO 7 — src/modules/leads/LeadDetailPage.tsx: substituir
+
+===== TRECHO ATUAL (REMOVER) =====
+import { leadProductsTotal } from './leadFilters';
+import { toLocalInput } from '../../services/googleCalendar';
+import { formatCurrency, formatDate } from '../../utils/cn';
+import { Button } from '../../components/ui/Button';
+===== FIM DO TRECHO ATUAL =====
+
+por:
+
+===== TRECHO NOVO =====
+import { leadProductsTotal } from './leadFilters';
+import { toLocalInput } from '../../services/googleCalendar';
+import { LeadFollowupBox } from './LeadFollowupBox';
+import { formatCurrency, formatDate } from '../../utils/cn';
+import { Button } from '../../components/ui/Button';
+===== FIM DO TRECHO NOVO =====
+
+----------------------------------------------------------------
+ALTERAÇÃO 8 — src/modules/leads/LeadDetailPage.tsx: substituir
+
+===== TRECHO ATUAL (REMOVER) =====
+            </div>
+
+            {/* Contato Principal */}
+            <div className="space-y-3">
+===== FIM DO TRECHO ATUAL =====
+
+por:
+
+===== TRECHO NOVO =====
+            </div>
+
+            {/* Follow-up automático */}
+            <LeadFollowupBox lead={lead} />
+
+            {/* Contato Principal */}
+            <div className="space-y-3">
+===== FIM DO TRECHO NOVO =====
