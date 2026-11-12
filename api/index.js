@@ -2232,20 +2232,30 @@ async function upsertSocialComment(row, conn) {
   }
   check(await sb.from("social_comments").upsert({ ...row, ...media, updated_at: (/* @__PURE__ */ new Date()).toISOString() }, { onConflict: "id" }), "gravar comentário");
 }
+// O botão "Teste" do painel da Meta envia mensagens em entry.changes (field "messages");
+// os avisos reais vêm em entry.messaging. Junta os dois formatos.
+function metaMessagingEvents(entry) {
+  const fromChanges = (entry.changes || []).filter((ch) => ch.field === "messages" && ch.value).map((ch) => ch.value);
+  return [...entry.messaging || [], ...fromChanges];
+}
 async function handleMetaEntry(object, entry) {
   if (object === "page") {
     const conn = await connectionFor({ pageId: entry.id });
-    for (const m of entry.messaging || []) {
+    for (const m of metaMessagingEvents(entry)) {
       if (!m.message || m.message.is_deleted) continue;
       const fromMe = Boolean(m.message.is_echo);
       const participantId = fromMe ? m.recipient?.id : m.sender?.id;
       if (!participantId) continue;
-      await upsertSocialMessage({ canal: "messenger", ownerId: entry.id, conn, participantId, mid: m.message.mid, fromMe,
+      await upsertSocialMessage({ canal: "messenger", ownerId: entry.id, conn, participantId, mid: m.message.mid || `fb-${participantId}-${m.timestamp || Date.now()}`, fromMe,
         texto: m.message.text || attachmentLabel(m.message.attachments) || "[Mensagem]", at: tsIso(m.timestamp) });
     }
     for (const ch of entry.changes || []) {
       const v = ch.value || {};
-      if (ch.field !== "feed" || v.item !== "comment") continue;
+      if (ch.field !== "feed") continue;
+      if (v.item !== "comment") {
+        console.log(`[Meta webhook] feed ignorado: item "${v.item}" (só comentários aparecem no CRM)`);
+        continue;
+      }
       if (v.verb === "remove") { await db().from("social_comments").delete().eq("id", v.comment_id); continue; }
       if (v.verb === "hide" || v.verb === "unhide") { await db().from("social_comments").update({ oculto: v.verb === "hide" }).eq("id", v.comment_id); continue; }
       if (v.verb !== "add" && v.verb !== "edited") continue;
@@ -2258,12 +2268,12 @@ async function handleMetaEntry(object, entry) {
     }
   } else if (object === "instagram") {
     const conn = await connectionFor({ igUserId: entry.id });
-    for (const m of entry.messaging || []) {
+    for (const m of metaMessagingEvents(entry)) {
       if (!m.message || m.message.is_deleted) continue;
       const fromMe = Boolean(m.message.is_echo);
       const participantId = fromMe ? m.recipient?.id : m.sender?.id;
       if (!participantId) continue;
-      await upsertSocialMessage({ canal: "instagram", ownerId: entry.id, conn, participantId, mid: m.message.mid, fromMe,
+      await upsertSocialMessage({ canal: "instagram", ownerId: entry.id, conn, participantId, mid: m.message.mid || `ig-${participantId}-${m.timestamp || Date.now()}`, fromMe,
         texto: m.message.text || attachmentLabel(m.message.attachments) || "[Mensagem]", at: tsIso(m.timestamp) });
     }
     for (const ch of entry.changes || []) {
@@ -2284,6 +2294,12 @@ app.post("/api/webhook/meta", async (req, res) => {
     return res.sendStatus(401);
   }
   const { object, entry } = req.body || {};
+  const resumo = (entry || []).map((e) => {
+    const msgs = metaMessagingEvents(e).length;
+    const campos = (e.changes || []).map((ch) => `${ch.field}${ch.value?.item ? `(${ch.value.item}/${ch.value.verb || ""})` : ""}`);
+    return `conta ${e.id}: ${msgs} mensagem(ns)${campos.length ? `, ${campos.join(", ")}` : ""}`;
+  }).join(" | ");
+  console.log(`[Meta webhook] recebido: ${object} — ${resumo || "sem conteúdo"}`);
   try {
     for (const e of entry || []) await handleMetaEntry(object, e);
   } catch (err) {
