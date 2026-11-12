@@ -13,6 +13,7 @@ import { LoginPage } from '../../modules/login/LoginPage';
 
 import { PainelPage } from '../../modules/painel/PainelPage';
 import { AgendaPage } from '../../modules/agenda/AgendaPage';
+import { SocialPage } from '../../modules/social/SocialPage';
 import { LeadsPage } from '../../modules/leads/LeadsPage';
 import { LeadDetailPage } from '../../modules/leads/LeadDetailPage';
 import { ChatsPage } from '../../modules/chats/ChatsPage';
@@ -101,6 +102,7 @@ export const Shell: React.FC = () => {
       case 'leads': return <LeadsPage />;
       case 'chats': return <ChatsPage />;
       case 'agenda': return <AgendaPage />;
+      case 'social': return <SocialPage />;
       case 'listas/contatos':
       case 'listas/empresas':
       case 'listas/produtos':
@@ -123,6 +125,7 @@ export const Shell: React.FC = () => {
       case 'leads': return 'Funil de Vendas & Leads';
       case 'chats': return 'Caixa de Entrada Unificada';
       case 'agenda': return 'Tarefas & Agenda';
+      case 'social': return 'Social: Instagram e Facebook';
       case 'listas/contatos': return 'Listas & Cadastros';
       case 'email': return 'E-mail Comercial';
       case 'estatisticas': return 'Estatísticas & Relatórios';

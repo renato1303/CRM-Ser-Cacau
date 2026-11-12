@@ -4,6 +4,7 @@ import { useStore } from '../../store/useStore';
 import { Button } from '../../components/ui/Button';
 import { confirmDialog } from '../../components/ui/ConfirmDialog';
 import { GoogleStatus, googleConnect, googleDisconnect, googleStatus } from '../../services/googleCalendar';
+import { MetaIntegrationCard } from './MetaIntegrationCard';
 
 // Configurações > Integrações: conectar o Google Agenda de quem está logado
 export const IntegracoesSettings: React.FC = () => {
@@ -103,6 +104,8 @@ export const IntegracoesSettings: React.FC = () => {
           )}
         </div>
       </div>
+
+      <MetaIntegrationCard />
     </div>
   );
 };

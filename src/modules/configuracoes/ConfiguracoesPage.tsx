@@ -16,7 +16,7 @@ export const ConfiguracoesPage: React.FC = () => {
     restoreSeed, clearAllData, clearAllDataCompletely, tags 
   } = useStore();
   const [tab, setTab] = useState<'etiquetas' | 'integracoes' | 'followup' | 'templates' | 'email_templates'>(
-    () => (new URLSearchParams(window.location.search).get('google') ? 'integracoes' : 'etiquetas')
+    () => { const q = new URLSearchParams(window.location.search); return q.get('google') || q.get('meta') ? 'integracoes' : 'etiquetas'; }
   );
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   

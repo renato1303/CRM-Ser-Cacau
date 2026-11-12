@@ -1,0 +1,664 @@
+FACEBOOK E INSTAGRAM (parte B de 2 — telas): tela Social (Direct, Messenger e Comentários), item Social no menu e cartão de conexão em Configurações > Integrações.
+
+REGRAS (obrigatórias):
+- Use EXATAMENTE o código abaixo, caractere por caractere. Não resuma, não reescreva, não "melhore", não converta de linguagem e não renomeie nada.
+- Não crie colunas, tabelas ou campos que não estejam no código abaixo.
+- Não altere nenhum outro arquivo nem outras partes dos arquivos citados.
+- Cada TRECHO ATUAL aparece uma única vez no arquivo: substitua exatamente ele pelo TRECHO NOVO.
+- Arquivos marcados como CRIAR: crie com o conteúdo completo (ou substitua todo o conteúdo, se já existir).
+- Ao terminar, responda apenas com a lista do que foi alterado.
+
+----------------------------------------------------------------
+ALTERAÇÃO 1 — CRIAR src/services/meta.ts:
+
+===== INÍCIO DO src/services/meta.ts =====
+// Facebook e Instagram (as chamadas passam pelo servidor do CRM)
+export interface MetaStatus {
+  configurado: boolean;
+  webhookUrl: string | null;
+  redirectUri: string | null;
+  privacidadeUrl: string | null;
+  verifyTokenDefinido: boolean;
+  paginas: { pageId: string; pageName: string; igUserId: string | null; igUsername: string | null; conectadoEm: string; erro?: string | null }[];
+}
+
+export interface SocialThread {
+  id: string;
+  canal: 'instagram' | 'messenger';
+  participant_id: string;
+  participant_name: string | null;
+  participant_username: string | null;
+  participant_pic: string | null;
+  ultima_mensagem: string | null;
+  ultima_mensagem_at: string | null;
+  ultima_do_cliente_at: string | null;
+  nao_lidas: number;
+  lead_id: string | null;
+}
+
+export interface SocialMessage { id: string; thread_id: string; from_me: boolean; texto: string; enviada_at: string; }
+
+export interface SocialComment {
+  id: string;
+  canal: 'instagram' | 'facebook';
+  ad_id: string | null;
+  ad_title: string | null;
+  parent_id: string | null;
+  author_name: string | null;
+  author_username: string | null;
+  texto: string;
+  criado_at: string;
+  permalink: string | null;
+  media_thumb: string | null;
+  post_texto: string | null;
+  respondido: boolean;
+  resposta_texto: string | null;
+  oculto: boolean;
+  lead_id: string | null;
+}
+
+async function call<T = any>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url, init);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Erro ${res.status}`);
+  return data as T;
+}
+const postJson = (url: string, body: any) => call(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+export const metaApi = {
+  status: () => call<MetaStatus>('/api/meta/status'),
+  connect: async () => {
+    const { url } = await call<{ url: string }>('/api/meta/auth-url', { method: 'POST' });
+    window.location.href = url;
+  },
+  disconnect: (pageId: string) => postJson('/api/meta/disconnect', { pageId }),
+  threads: (canal?: string) => call<{ threads: SocialThread[] }>(`/api/social/threads${canal ? `?canal=${canal}` : ''}`).then(r => r.threads),
+  messages: (threadId: string) => call<{ messages: SocialMessage[] }>(`/api/social/messages?threadId=${encodeURIComponent(threadId)}`).then(r => r.messages),
+  read: (threadId: string) => postJson('/api/social/read', { threadId }),
+  send: (threadId: string, texto: string) => postJson('/api/social/send', { threadId, texto }),
+  comments: (canal?: string, status?: string) => {
+    const q = new URLSearchParams();
+    if (canal) q.set('canal', canal);
+    if (status) q.set('status', status);
+    return call<{ comments: SocialComment[] }>(`/api/social/comments?${q.toString()}`).then(r => r.comments);
+  },
+  replyComment: (commentId: string, texto: string) => postJson('/api/social/comment-reply', { commentId, texto }),
+  hideComment: (commentId: string, ocultar: boolean) => postJson('/api/social/comment-hide', { commentId, ocultar }),
+  criarLead: (body: { threadId?: string; commentId?: string }) => postJson('/api/social/criar-lead', body) as Promise<{ ok: boolean; leadId: string; existente?: boolean }>,
+};
+===== FIM DO src/services/meta.ts =====
+
+----------------------------------------------------------------
+ALTERAÇÃO 2 — CRIAR src/modules/social/SocialPage.tsx:
+
+===== INÍCIO DO src/modules/social/SocialPage.tsx =====
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Instagram, Facebook, MessageCircle, MessagesSquare, Send, EyeOff, Eye, UserPlus, ExternalLink, RefreshCw, Megaphone, Link2 } from 'lucide-react';
+import { useStore } from '../../store/useStore';
+import { cn } from '../../utils/cn';
+import { metaApi, SocialComment, SocialMessage, SocialThread } from '../../services/meta';
+
+type Aba = 'instagram' | 'messenger' | 'comentarios';
+const fmt = (iso?: string | null) => (iso ? new Date(iso).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '');
+const nomeThread = (t: SocialThread) => t.participant_name || (t.participant_username ? `@${t.participant_username}` : 'Contato');
+
+// Social: Direct do Instagram, Messenger e comentários (posts e anúncios) num só lugar
+export const SocialPage: React.FC = () => {
+  const { addToast, setActiveModule, refreshData } = useStore();
+  const [aba, setAba] = useState<Aba>('instagram');
+  const [threads, setThreads] = useState<SocialThread[]>([]);
+  const [selected, setSelected] = useState<SocialThread | null>(null);
+  const [messages, setMessages] = useState<SocialMessage[]>([]);
+  const [comments, setComments] = useState<SocialComment[]>([]);
+  const [filtroComent, setFiltroComent] = useState<'pendentes' | 'todos'>('pendentes');
+  const [canalComent, setCanalComent] = useState<'' | 'instagram' | 'facebook'>('');
+  const [texto, setTexto] = useState('');
+  const [respostas, setRespostas] = useState<Record<string, string>>({});
+  const [conectado, setConectado] = useState<boolean | null>(null);
+  const [loading, setLoading] = useState(false);
+  const feedRef = useRef<HTMLDivElement>(null);
+
+  const carregar = useCallback(async () => {
+    try {
+      if (aba === 'comentarios') {
+        setComments(await metaApi.comments(canalComent || undefined, filtroComent));
+      } else {
+        const list = await metaApi.threads(aba);
+        setThreads(list);
+        setSelected(sel => (sel ? list.find(t => t.id === sel.id) || sel : sel));
+      }
+    } catch (err: any) {
+      addToast('Social', err.message, 'error');
+    }
+  }, [aba, filtroComent, canalComent]);
+
+  useEffect(() => {
+    metaApi.status().then(s => setConectado(s.paginas.length > 0)).catch(() => setConectado(false));
+  }, []);
+
+  useEffect(() => {
+    setLoading(true);
+    carregar().finally(() => setLoading(false));
+    const timer = setInterval(carregar, 10000); // atualiza a cada 10 segundos
+    return () => clearInterval(timer);
+  }, [carregar]);
+
+  useEffect(() => { setSelected(null); setMessages([]); }, [aba]);
+
+  // Mensagens da conversa aberta
+  useEffect(() => {
+    if (!selected) return;
+    let active = true;
+    const load = () => metaApi.messages(selected.id).then(m => { if (active) setMessages(m); }).catch(() => null);
+    load();
+    if (selected.nao_lidas > 0) metaApi.read(selected.id).catch(() => null);
+    const timer = setInterval(load, 8000);
+    return () => { active = false; clearInterval(timer); };
+  }, [selected?.id]);
+
+  useEffect(() => {
+    const el = feedRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages.length, selected?.id]);
+
+  const janelaAberta = useMemo(() => {
+    if (!selected?.ultima_do_cliente_at) return false;
+    return Date.now() - new Date(selected.ultima_do_cliente_at).getTime() < 24 * 3600 * 1000;
+  }, [selected]);
+
+  const enviar = async () => {
+    if (!selected || !texto.trim()) return;
+    try {
+      await metaApi.send(selected.id, texto.trim());
+      setTexto('');
+      setMessages(await metaApi.messages(selected.id));
+      carregar();
+    } catch (err: any) {
+      addToast('Não foi possível enviar', err.message, 'error');
+    }
+  };
+
+  const criarLead = async (body: { threadId?: string; commentId?: string }) => {
+    try {
+      const r = await metaApi.criarLead(body);
+      await refreshData();
+      addToast(r.existente ? 'Já está no funil' : 'Lead criado', r.existente ? 'Esta pessoa já tinha um lead.' : 'Ele entrou em Leads de Entrada.', 'success');
+      carregar();
+    } catch (err: any) {
+      addToast('Não foi possível criar o lead', err.message, 'error');
+    }
+  };
+
+  const abrirLead = (leadId: string) => {
+    window.location.hash = `#/leads/${leadId}`;
+    setActiveModule(`leads/${leadId}`);
+  };
+
+  const responderComentario = async (c: SocialComment) => {
+    const t = (respostas[c.id] || '').trim();
+    if (!t) return;
+    try {
+      await metaApi.replyComment(c.id, t);
+      setRespostas(r => ({ ...r, [c.id]: '' }));
+      addToast('Resposta publicada', '', 'success');
+      carregar();
+    } catch (err: any) {
+      addToast('Não foi possível responder', err.message, 'error');
+    }
+  };
+
+  const ocultar = async (c: SocialComment) => {
+    try {
+      await metaApi.hideComment(c.id, !c.oculto);
+      carregar();
+    } catch (err: any) {
+      addToast('Não foi possível alterar', err.message, 'error');
+    }
+  };
+
+  const naoLidas = (canal: string) => threads.filter(t => t.canal === canal).reduce((a, t) => a + (t.nao_lidas || 0), 0);
+  const abas: { id: Aba; label: string; icon: React.ReactNode; badge?: number }[] = [
+    { id: 'instagram', label: 'Direct (Instagram)', icon: <Instagram className="w-4 h-4" />, badge: aba === 'instagram' ? naoLidas('instagram') : undefined },
+    { id: 'messenger', label: 'Messenger (Facebook)', icon: <MessageCircle className="w-4 h-4" />, badge: aba === 'messenger' ? naoLidas('messenger') : undefined },
+    { id: 'comentarios', label: 'Comentários', icon: <MessagesSquare className="w-4 h-4" /> },
+  ];
+
+  if (conectado === false) {
+    return (
+      <div className="flex-1 flex items-center justify-center p-8 bg-slate-50 dark:bg-slate-950">
+        <div className="max-w-md text-center space-y-3">
+          <Link2 className="w-10 h-10 mx-auto text-slate-400" />
+          <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100">Conecte o Facebook e o Instagram</h2>
+          <p className="text-sm text-slate-500">Vá em Configurações &gt; Integrações e clique em "Conectar Facebook e Instagram". Depois disso, o Direct, o Messenger e os comentários aparecem aqui.</p>
+          <button type="button" onClick={() => setActiveModule('configuracoes')} className="px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm">Ir para Configurações</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0 bg-slate-50 dark:bg-slate-950">
+      <div className="px-6 pt-5 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-1 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-1 rounded-xl">
+          {abas.map(a => (
+            <button key={a.id} type="button" onClick={() => setAba(a.id)}
+              className={cn('flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium', aba === a.id ? 'bg-indigo-600 text-white' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800')}>
+              {a.icon} {a.label}
+              {!!a.badge && <span className="ml-1 px-1.5 rounded-full bg-red-500 text-white text-[10px]">{a.badge}</span>}
+            </button>
+          ))}
+        </div>
+        <button type="button" onClick={() => carregar()} className="text-xs text-slate-500 hover:text-indigo-600 flex items-center gap-1">
+          <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} /> Atualizar
+        </button>
+      </div>
+
+      {aba !== 'comentarios' ? (
+        <div className="flex-1 min-h-0 m-6 mt-4 grid grid-cols-1 md:grid-cols-[320px_1fr] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden">
+          {/* Lista de conversas */}
+          <div className="border-r border-slate-200 dark:border-slate-800 overflow-y-auto">
+            {threads.length === 0 ? (
+              <p className="text-xs text-slate-400 text-center py-10 px-4">Nenhuma conversa ainda. As mensagens novas aparecem aqui assim que chegarem.</p>
+            ) : threads.map(t => (
+              <button key={t.id} type="button" onClick={() => setSelected(t)}
+                className={cn('w-full flex items-center gap-3 px-4 py-3 text-left border-b border-slate-100 dark:border-slate-800', selected?.id === t.id ? 'bg-indigo-50 dark:bg-indigo-950/40' : 'hover:bg-slate-50 dark:hover:bg-slate-800/50')}>
+                {t.participant_pic
+                  ? <img src={t.participant_pic} alt="" className="w-9 h-9 rounded-full object-cover shrink-0" />
+                  : <div className="w-9 h-9 rounded-full bg-slate-200 dark:bg-slate-700 shrink-0" />}
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">{nomeThread(t)}</span>
+                    <span className="text-[10px] text-slate-400 shrink-0">{fmt(t.ultima_mensagem_at)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] text-slate-500 truncate">{t.ultima_mensagem}</span>
+                    {t.nao_lidas > 0 && <span className="px-1.5 rounded-full bg-indigo-600 text-white text-[10px] shrink-0">{t.nao_lidas}</span>}
+                  </div>
+                </div>
+              </button>
+            ))}
+          </div>
+
+          {/* Conversa aberta */}
+          {selected ? (
+            <div className="flex flex-col min-h-0">
+              <div className="px-5 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-bold text-slate-900 dark:text-slate-100 truncate">{nomeThread(selected)}</p>
+                  {selected.participant_username && <p className="text-[11px] text-slate-500">@{selected.participant_username}</p>}
+                </div>
+                {selected.lead_id ? (
+                  <button type="button" onClick={() => abrirLead(selected.lead_id!)} className="px-3 py-1.5 rounded-lg text-xs border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 flex items-center gap-1">
+                    <ExternalLink className="w-3.5 h-3.5" /> Abrir lead
+                  </button>
+                ) : (
+                  <button type="button" onClick={() => criarLead({ threadId: selected.id })} className="px-3 py-1.5 rounded-lg text-xs bg-indigo-600 text-white flex items-center gap-1">
+                    <UserPlus className="w-3.5 h-3.5" /> Enviar para o funil
+                  </button>
+                )}
+              </div>
+              <div ref={feedRef} className="flex-1 overflow-y-auto p-5 space-y-3">
+                {messages.map(m => (
+                  <div key={m.id} className={cn('flex', m.from_me ? 'justify-end' : 'justify-start')}>
+                    <div className={cn('max-w-[70%] px-3.5 py-2.5 rounded-2xl text-xs', m.from_me ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200 rounded-bl-none')}>
+                      <p className="whitespace-pre-line">{m.texto}</p>
+                      <span className={cn('block text-[10px] mt-1 text-right', m.from_me ? 'text-indigo-200' : 'text-slate-400')}>{fmt(m.enviada_at)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="p-4 border-t border-slate-200 dark:border-slate-800">
+                {!janelaAberta && (
+                  <p className="text-[11px] text-amber-600 mb-2">Mais de 24 horas desde a última mensagem do cliente: pela regra da Meta, só dá para responder quando ele escrever de novo.</p>
+                )}
+                <div className="flex gap-2">
+                  <textarea rows={2} value={texto} onChange={(e) => setTexto(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); enviar(); } }}
+                    disabled={!janelaAberta} placeholder={janelaAberta ? 'Escreva a resposta… (Enter envia)' : 'Aguardando o cliente escrever'}
+                    className="flex-1 px-3 py-2 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-slate-100 outline-none resize-none disabled:opacity-60" />
+                  <button type="button" onClick={enviar} disabled={!janelaAberta || !texto.trim()} aria-label="Enviar"
+                    className="px-3 rounded-xl bg-indigo-600 text-white disabled:opacity-40"><Send className="w-4 h-4" /></button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center justify-center text-xs text-slate-400 p-8">Escolha uma conversa à esquerda.</div>
+          )}
+        </div>
+      ) : (
+        <div className="flex-1 min-h-0 m-6 mt-4 flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            {([['pendentes', 'Sem resposta'], ['todos', 'Todos']] as const).map(([id, label]) => (
+              <button key={id} type="button" onClick={() => setFiltroComent(id)}
+                className={cn('px-3 py-1.5 rounded-lg border', filtroComent === id ? 'border-indigo-500 bg-indigo-600 text-white' : 'border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300')}>{label}</button>
+            ))}
+            <select value={canalComent} onChange={(e) => setCanalComent(e.target.value as any)}
+              className="px-2 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">
+              <option value="">Instagram e Facebook</option>
+              <option value="instagram">Só Instagram</option>
+              <option value="facebook">Só Facebook</option>
+            </select>
+          </div>
+          <div className="flex-1 overflow-y-auto space-y-3 pr-1">
+            {comments.length === 0 ? (
+              <p className="text-xs text-slate-400 text-center py-10">{filtroComent === 'pendentes' ? 'Nenhum comentário esperando resposta.' : 'Nenhum comentário ainda.'}</p>
+            ) : comments.map(c => (
+              <div key={c.id} className={cn('p-4 rounded-2xl border bg-white dark:bg-slate-900', c.oculto ? 'border-dashed border-slate-300 dark:border-slate-700 opacity-70' : 'border-slate-200 dark:border-slate-800')}>
+                <div className="flex gap-3">
+                  {c.media_thumb
+                    ? <img src={c.media_thumb} alt="" className="w-14 h-14 rounded-lg object-cover shrink-0" />
+                    : <div className="w-14 h-14 rounded-lg bg-slate-100 dark:bg-slate-800 shrink-0" />}
+                  <div className="flex-1 min-w-0 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+                      {c.canal === 'instagram' ? <Instagram className="w-3.5 h-3.5" /> : <Facebook className="w-3.5 h-3.5" />}
+                      <span className="font-semibold text-slate-900 dark:text-slate-100">{c.author_username ? `@${c.author_username}` : c.author_name || 'Alguém'}</span>
+                      <span>· {fmt(c.criado_at)}</span>
+                      {c.ad_title && <span className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300"><Megaphone className="w-3 h-3" /> Anúncio: {c.ad_title}</span>}
+                      {c.parent_id && <span className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800">resposta a outro comentário</span>}
+                      {c.oculto && <span className="px-1.5 py-0.5 rounded bg-slate-200 dark:bg-slate-700">oculto</span>}
+                      {c.permalink && <a href={c.permalink} target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline flex items-center gap-0.5">ver publicação <ExternalLink className="w-3 h-3" /></a>}
+                    </div>
+                    <p className="text-sm text-slate-800 dark:text-slate-200 whitespace-pre-line">{c.texto}</p>
+                    {c.post_texto && <p className="text-[11px] text-slate-400 truncate">Na publicação: {c.post_texto}</p>}
+                    {c.respondido && c.resposta_texto && <p className="text-[11px] text-emerald-600">Respondido: {c.resposta_texto}</p>}
+                    {!c.oculto && (
+                      <div className="flex gap-2 pt-1">
+                        <input value={respostas[c.id] || ''} onChange={(e) => setRespostas(r => ({ ...r, [c.id]: e.target.value }))}
+                          onKeyDown={(e) => { if (e.key === 'Enter') responderComentario(c); }}
+                          placeholder="Responder publicamente…"
+                          className="flex-1 px-3 py-1.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-slate-100 outline-none" />
+                        <button type="button" onClick={() => responderComentario(c)} disabled={!(respostas[c.id] || '').trim()}
+                          className="px-3 rounded-lg bg-indigo-600 text-white text-xs disabled:opacity-40">Responder</button>
+                      </div>
+                    )}
+                    <div className="flex flex-wrap gap-3 pt-1 text-[11px]">
+                      <button type="button" onClick={() => ocultar(c)} className="text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 flex items-center gap-1">
+                        {c.oculto ? <><Eye className="w-3.5 h-3.5" /> Mostrar de novo</> : <><EyeOff className="w-3.5 h-3.5" /> Ocultar</>}
+                      </button>
+                      {c.lead_id ? (
+                        <button type="button" onClick={() => abrirLead(c.lead_id!)} className="text-indigo-600 hover:underline flex items-center gap-1"><ExternalLink className="w-3.5 h-3.5" /> Abrir lead</button>
+                      ) : (
+                        <button type="button" onClick={() => criarLead({ commentId: c.id })} className="text-indigo-600 hover:underline flex items-center gap-1"><UserPlus className="w-3.5 h-3.5" /> Enviar para o funil</button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+===== FIM DO src/modules/social/SocialPage.tsx =====
+
+----------------------------------------------------------------
+ALTERAÇÃO 3 — CRIAR src/modules/configuracoes/MetaIntegrationCard.tsx:
+
+===== INÍCIO DO src/modules/configuracoes/MetaIntegrationCard.tsx =====
+import React, { useEffect, useState } from 'react';
+import { Instagram, Facebook, CheckCircle2, AlertCircle, Link2, Unlink, Loader2, Copy } from 'lucide-react';
+import { useStore } from '../../store/useStore';
+import { Button } from '../../components/ui/Button';
+import { confirmDialog } from '../../components/ui/ConfirmDialog';
+import { MetaStatus, metaApi } from '../../services/meta';
+
+// Configurações > Integrações: Facebook (Messenger e comentários) e Instagram (Direct e comentários)
+export const MetaIntegrationCard: React.FC = () => {
+  const { addToast } = useStore();
+  const [status, setStatus] = useState<MetaStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  const load = () => {
+    setLoading(true);
+    metaApi.status().then(setStatus).catch(err => addToast('Facebook e Instagram', err.message, 'error')).finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    load();
+    // Volta do login do Facebook: ?meta=conectado ou ?meta=erro&motivo=...
+    const params = new URLSearchParams(window.location.search);
+    const result = params.get('meta');
+    if (result) {
+      if (result === 'conectado') addToast('Facebook e Instagram conectados', 'As mensagens e os comentários novos vão aparecer na tela Social.', 'success');
+      else addToast('Não foi possível conectar', params.get('motivo') || 'Tente de novo.', 'error');
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.hash}`);
+    }
+  }, []);
+
+  const copiar = (t?: string | null) => {
+    if (!t) return;
+    navigator.clipboard?.writeText(t).then(() => addToast('Copiado', t, 'success')).catch(() => null);
+  };
+
+  const conectar = async () => {
+    setBusy(true);
+    try { await metaApi.connect(); } catch (err: any) { addToast('Facebook e Instagram', err.message, 'error'); setBusy(false); }
+  };
+
+  const desconectar = async (pageId: string, nome: string) => {
+    const ok = await confirmDialog({ title: `Desconectar "${nome}"?`, message: 'Mensagens e comentários novos deixam de chegar ao CRM. O que já chegou continua salvo.', confirmLabel: 'Desconectar' });
+    if (!ok) return;
+    setBusy(true);
+    try { await metaApi.disconnect(pageId); load(); } catch (err: any) { addToast('Erro', err.message, 'error'); } finally { setBusy(false); }
+  };
+
+  const Linha: React.FC<{ rotulo: string; valor?: string | null; copiavel?: boolean }> = ({ rotulo, valor, copiavel = true }) => (
+    <div className="flex items-center gap-2 text-[11px]">
+      <span className="text-slate-500 w-40 shrink-0">{rotulo}</span>
+      <code className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 truncate">{valor || '—'}</code>
+      {valor && copiavel && <button type="button" onClick={() => copiar(valor)} aria-label="Copiar" className="text-slate-400 hover:text-indigo-600"><Copy className="w-3.5 h-3.5" /></button>}
+    </div>
+  );
+
+  return (
+    <div className="p-5 rounded-2xl border border-slate-200 dark:border-slate-800 flex flex-col gap-4">
+      <div className="flex flex-col md:flex-row md:items-center gap-4">
+        <div className="w-11 h-11 rounded-xl bg-pink-50 dark:bg-pink-950/40 text-pink-600 flex items-center justify-center shrink-0 gap-0.5">
+          <Instagram className="w-4 h-4" /><Facebook className="w-4 h-4 text-blue-600" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h4 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Facebook e Instagram</h4>
+          <p className="text-xs text-slate-500">Direct do Instagram, Messenger e comentários em posts e anúncios, na tela Social. Conexão oficial pela Meta.</p>
+        </div>
+        <div className="shrink-0">
+          {loading ? <Loader2 className="w-5 h-5 animate-spin text-slate-400" /> : (
+            <Button size="sm" onClick={conectar} disabled={busy || !status?.configurado} className="gap-1.5">
+              <Link2 className="w-4 h-4" /> {status?.paginas.length ? 'Conectar outra Página' : 'Conectar Facebook e Instagram'}
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {!loading && status && (
+        <>
+          {!status.configurado && (
+            <p className="text-xs text-amber-600 flex items-start gap-1.5">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              O servidor ainda não tem as chaves do app da Meta. Cadastre META_APP_ID, META_APP_SECRET e META_VERIFY_TOKEN na Vercel e faça o Redeploy.
+            </p>
+          )}
+          {status.paginas.map(p => (
+            <div key={p.pageId} className="flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 text-xs">
+              <span className="flex items-center gap-1.5 text-emerald-600"><CheckCircle2 className="w-4 h-4" /> {p.pageName}{p.igUsername ? ` · Instagram @${p.igUsername}` : ' · sem Instagram ligado'}</span>
+              <button type="button" onClick={() => desconectar(p.pageId, p.pageName)} disabled={busy} className="text-slate-500 hover:text-red-500 flex items-center gap-1"><Unlink className="w-3.5 h-3.5" /> Desconectar</button>
+            </div>
+          ))}
+          <div className="space-y-1.5">
+            <p className="text-[11px] font-semibold text-slate-500">Dados para configurar o app no painel da Meta (developers.facebook.com):</p>
+            <Linha rotulo="URL de retorno do login" valor={status.redirectUri} />
+            <Linha rotulo="URL de callback (Webhooks)" valor={status.webhookUrl} />
+            <Linha rotulo="Política de privacidade" valor={status.privacidadeUrl} />
+            <Linha rotulo="Token de verificação" valor={status.verifyTokenDefinido ? 'o valor de META_VERIFY_TOKEN da Vercel' : 'defina META_VERIFY_TOKEN na Vercel'} copiavel={false} />
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+===== FIM DO src/modules/configuracoes/MetaIntegrationCard.tsx =====
+
+----------------------------------------------------------------
+ALTERAÇÃO 4 — src/components/layout/Sidebar.tsx: substituir
+
+===== TRECHO ATUAL (REMOVER) =====
+import { 
+  LayoutDashboard, Users, MessageSquare, Calendar, ListTree, 
+  Mail, BarChart3, Workflow, Send, Bot, Globe, Settings, LogOut, ChevronUp, User as UserIcon, Plug 
+} from 'lucide-react';
+import { useStore } from '../../store/useStore';
+===== FIM DO TRECHO ATUAL =====
+
+por:
+
+===== TRECHO NOVO =====
+import { 
+  LayoutDashboard, Users, MessageSquare, Calendar, ListTree, 
+  Mail, BarChart3, Workflow, Send, Bot, Globe, Settings, LogOut, ChevronUp, User as UserIcon, Plug, AtSign
+} from 'lucide-react';
+import { useStore } from '../../store/useStore';
+===== FIM DO TRECHO NOVO =====
+
+----------------------------------------------------------------
+ALTERAÇÃO 5 — src/components/layout/Sidebar.tsx: substituir
+
+===== TRECHO ATUAL (REMOVER) =====
+    { id: 'chats', label: 'Chats', icon: MessageSquare, badge: unreadChatsCount > 0 ? unreadChatsCount : undefined },
+    { id: 'agenda', label: 'Tarefas', icon: Calendar },
+    { id: 'listas/contatos', label: 'Listas', icon: ListTree },
+    { id: 'email', label: 'E-mail', icon: Mail },
+===== FIM DO TRECHO ATUAL =====
+
+por:
+
+===== TRECHO NOVO =====
+    { id: 'chats', label: 'Chats', icon: MessageSquare, badge: unreadChatsCount > 0 ? unreadChatsCount : undefined },
+    { id: 'agenda', label: 'Tarefas', icon: Calendar },
+    { id: 'social', label: 'Social', icon: AtSign },
+    { id: 'listas/contatos', label: 'Listas', icon: ListTree },
+    { id: 'email', label: 'E-mail', icon: Mail },
+===== FIM DO TRECHO NOVO =====
+
+----------------------------------------------------------------
+ALTERAÇÃO 6 — src/components/layout/Shell.tsx: substituir
+
+===== TRECHO ATUAL (REMOVER) =====
+import { PainelPage } from '../../modules/painel/PainelPage';
+import { AgendaPage } from '../../modules/agenda/AgendaPage';
+import { LeadsPage } from '../../modules/leads/LeadsPage';
+import { LeadDetailPage } from '../../modules/leads/LeadDetailPage';
+===== FIM DO TRECHO ATUAL =====
+
+por:
+
+===== TRECHO NOVO =====
+import { PainelPage } from '../../modules/painel/PainelPage';
+import { AgendaPage } from '../../modules/agenda/AgendaPage';
+import { SocialPage } from '../../modules/social/SocialPage';
+import { LeadsPage } from '../../modules/leads/LeadsPage';
+import { LeadDetailPage } from '../../modules/leads/LeadDetailPage';
+===== FIM DO TRECHO NOVO =====
+
+----------------------------------------------------------------
+ALTERAÇÃO 7 — src/components/layout/Shell.tsx: substituir
+
+===== TRECHO ATUAL (REMOVER) =====
+      case 'chats': return <ChatsPage />;
+      case 'agenda': return <AgendaPage />;
+      case 'listas/contatos':
+      case 'listas/empresas':
+===== FIM DO TRECHO ATUAL =====
+
+por:
+
+===== TRECHO NOVO =====
+      case 'chats': return <ChatsPage />;
+      case 'agenda': return <AgendaPage />;
+      case 'social': return <SocialPage />;
+      case 'listas/contatos':
+      case 'listas/empresas':
+===== FIM DO TRECHO NOVO =====
+
+----------------------------------------------------------------
+ALTERAÇÃO 8 — src/components/layout/Shell.tsx: substituir
+
+===== TRECHO ATUAL (REMOVER) =====
+      case 'chats': return 'Caixa de Entrada Unificada';
+      case 'agenda': return 'Tarefas & Agenda';
+      case 'listas/contatos': return 'Listas & Cadastros';
+      case 'email': return 'E-mail Comercial';
+===== FIM DO TRECHO ATUAL =====
+
+por:
+
+===== TRECHO NOVO =====
+      case 'chats': return 'Caixa de Entrada Unificada';
+      case 'agenda': return 'Tarefas & Agenda';
+      case 'social': return 'Social: Instagram e Facebook';
+      case 'listas/contatos': return 'Listas & Cadastros';
+      case 'email': return 'E-mail Comercial';
+===== FIM DO TRECHO NOVO =====
+
+----------------------------------------------------------------
+ALTERAÇÃO 9 — src/modules/configuracoes/ConfiguracoesPage.tsx: substituir
+
+===== TRECHO ATUAL (REMOVER) =====
+  } = useStore();
+  const [tab, setTab] = useState<'etiquetas' | 'integracoes' | 'followup' | 'templates' | 'email_templates'>(
+    () => (new URLSearchParams(window.location.search).get('google') ? 'integracoes' : 'etiquetas')
+  );
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+===== FIM DO TRECHO ATUAL =====
+
+por:
+
+===== TRECHO NOVO =====
+  } = useStore();
+  const [tab, setTab] = useState<'etiquetas' | 'integracoes' | 'followup' | 'templates' | 'email_templates'>(
+    () => { const q = new URLSearchParams(window.location.search); return q.get('google') || q.get('meta') ? 'integracoes' : 'etiquetas'; }
+  );
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+===== FIM DO TRECHO NOVO =====
+
+----------------------------------------------------------------
+ALTERAÇÃO 10 — src/modules/configuracoes/IntegracoesSettings.tsx: substituir
+
+===== TRECHO ATUAL (REMOVER) =====
+import { confirmDialog } from '../../components/ui/ConfirmDialog';
+import { GoogleStatus, googleConnect, googleDisconnect, googleStatus } from '../../services/googleCalendar';
+
+// Configurações > Integrações: conectar o Google Agenda de quem está logado
+===== FIM DO TRECHO ATUAL =====
+
+por:
+
+===== TRECHO NOVO =====
+import { confirmDialog } from '../../components/ui/ConfirmDialog';
+import { GoogleStatus, googleConnect, googleDisconnect, googleStatus } from '../../services/googleCalendar';
+import { MetaIntegrationCard } from './MetaIntegrationCard';
+
+// Configurações > Integrações: conectar o Google Agenda de quem está logado
+===== FIM DO TRECHO NOVO =====
+
+----------------------------------------------------------------
+ALTERAÇÃO 11 — src/modules/configuracoes/IntegracoesSettings.tsx: substituir
+
+===== TRECHO ATUAL (REMOVER) =====
+        </div>
+      </div>
+    </div>
+  );
+===== FIM DO TRECHO ATUAL =====
+
+por:
+
+===== TRECHO NOVO =====
+        </div>
+      </div>
+
+      <MetaIntegrationCard />
+    </div>
+  );
+===== FIM DO TRECHO NOVO =====

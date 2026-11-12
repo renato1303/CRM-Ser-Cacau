@@ -1,0 +1,445 @@
+FACEBOOK E INSTAGRAM (parte A de 2 — servidor): conexão oficial pelo login do Facebook, recebimento de Direct, Messenger e comentários (posts e anúncios) pelo webhook /api/webhook/meta, respostas, ocultar comentários e criação de lead.
+
+REGRAS (obrigatórias):
+- Use EXATAMENTE o código abaixo, caractere por caractere. Não resuma, não reescreva, não "melhore", não converta de linguagem e não renomeie nada.
+- Não crie colunas, tabelas ou campos que não estejam no código abaixo.
+- Não altere nenhum outro arquivo nem outras partes dos arquivos citados.
+- Cada TRECHO ATUAL aparece uma única vez no arquivo: substitua exatamente ele pelo TRECHO NOVO.
+- Arquivos marcados como CRIAR: crie com o conteúdo completo (ou substitua todo o conteúdo, se já existir).
+- Ao terminar, responda apenas com a lista do que foi alterado.
+
+----------------------------------------------------------------
+ALTERAÇÃO 1 — api/index.js: substituir
+
+===== TRECHO ATUAL (REMOVER) =====
+  /^\/api\/disparos\//,
+  /^\/api\/google\/callback/,
+  /^\/api\/followup\/tick/
+];
+const tokenCache = /* @__PURE__ */ new Map();
+===== FIM DO TRECHO ATUAL =====
+
+por:
+
+===== TRECHO NOVO =====
+  /^\/api\/disparos\//,
+  /^\/api\/google\/callback/,
+  /^\/api\/followup\/tick/,
+  /^\/api\/meta\/callback/,
+  /^\/api\/meta\/privacidade/
+];
+const tokenCache = /* @__PURE__ */ new Map();
+===== FIM DO TRECHO NOVO =====
+
+----------------------------------------------------------------
+ALTERAÇÃO 2 — api/index.js: substituir
+
+===== TRECHO ATUAL (REMOVER) =====
+  }
+});
+app.get("/api/crm/data", async (_req, res) => {
+  if (!supabaseAdmin) return res.status(503).json({ error: "Supabase não configurado no servidor" });
+===== FIM DO TRECHO ATUAL =====
+
+por:
+
+===== TRECHO NOVO =====
+  }
+});
+// ==========================================
+// META: FACEBOOK (Messenger e comentários) E INSTAGRAM (Direct e comentários)
+// Conexão oficial pelo login do Facebook; avisos chegam em /api/webhook/meta.
+// ==========================================
+// META_APP_ID e META_APP_SECRET já são lidos no início do arquivo (mesmas variáveis do WhatsApp oficial)
+const META_VERIFY_TOKEN = (process.env.META_VERIFY_TOKEN || "").trim();
+const META_GRAPH = `https://graph.facebook.com/${(process.env.META_GRAPH_VERSION || "v24.0").trim()}`;
+const META_SCOPES = [
+  "pages_show_list", "pages_manage_metadata", "pages_read_engagement", "pages_read_user_content", "pages_manage_engagement",
+  "pages_messaging", "instagram_basic", "instagram_manage_messages", "instagram_manage_comments", "business_management"
+].join(",");
+const metaConfigured = () => Boolean(META_APP_ID && META_APP_SECRET && PUBLIC_BASE_URL);
+const metaRedirectUri = () => `${PUBLIC_BASE_URL}/api/meta/callback`;
+function metaSign(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  return `${body}.${crypto.createHmac("sha256", META_APP_SECRET).update(body).digest("base64url")}`;
+}
+function metaReadState(state) {
+  const [body, sig] = String(state || "").split(".");
+  if (!body || !sig) return null;
+  const expected = crypto.createHmac("sha256", META_APP_SECRET).update(body).digest("base64url");
+  if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+  try { return JSON.parse(Buffer.from(body, "base64url").toString()); } catch { return null; }
+}
+async function graph(path, { method = "GET", token, params = {}, body } = {}) {
+  const url = new URL(path.startsWith("http") ? path : `${META_GRAPH}${path}`);
+  Object.entries({ ...params, ...(token ? { access_token: token } : {}) }).forEach(([k, v]) => v !== void 0 && url.searchParams.set(k, String(v)));
+  const res = await fetch(url, { method, headers: body ? { "Content-Type": "application/json" } : void 0, body: body ? JSON.stringify(body) : void 0 });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error) {
+    const e = data.error || {};
+    const err = new Error(e.error_user_msg || e.message || `Meta respondeu ${res.status}`);
+    err.metaCode = e.code; err.metaSubcode = e.error_subcode; err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+async function metaConnections() {
+  return check(await db().from("meta_connections").select("*"), "ler conexões da Meta") || [];
+}
+async function connectionFor({ pageId, igUserId }) {
+  const sb = db();
+  const q = pageId ? sb.from("meta_connections").select("*").eq("page_id", pageId) : sb.from("meta_connections").select("*").eq("ig_user_id", igUserId);
+  return check(await q.maybeSingle(), "ler conexão da Meta");
+}
+const tsIso = (t) => {
+  const n = Number(t);
+  if (!n) return (/* @__PURE__ */ new Date()).toISOString();
+  return new Date(n < 1e12 ? n * 1e3 : n).toISOString();
+};
+function attachmentLabel(atts) {
+  const a = (atts || [])[0];
+  if (!a) return null;
+  const map = { image: "[Imagem]", video: "[Vídeo]", audio: "[Áudio]", file: "[Arquivo]", sticker: "[Figurinha]", share: "[Compartilhamento]", story_mention: "[Menção no story]", reel: "[Reel]", ig_reel: "[Reel]" };
+  return map[a.type] || "[Anexo]";
+}
+
+// ---------- Conexão (login do Facebook) ----------
+app.get("/api/meta/status", async (_req, res) => {
+  const base = {
+    configurado: metaConfigured(),
+    webhookUrl: PUBLIC_BASE_URL ? `${PUBLIC_BASE_URL}/api/webhook/meta` : null,
+    redirectUri: PUBLIC_BASE_URL ? metaRedirectUri() : null,
+    privacidadeUrl: PUBLIC_BASE_URL ? `${PUBLIC_BASE_URL}/api/meta/privacidade` : null,
+    verifyTokenDefinido: Boolean(META_VERIFY_TOKEN)
+  };
+  if (!supabaseAdmin) return res.json({ ...base, paginas: [] });
+  try {
+    const rows = await metaConnections();
+    return res.json({ ...base, paginas: rows.map((r) => ({ pageId: r.page_id, pageName: r.page_name, igUserId: r.ig_user_id, igUsername: r.ig_username, conectadoEm: r.connected_at, erro: r.last_error })) });
+  } catch (err) {
+    return res.status(500).json({ ...base, error: errorMessage(err) });
+  }
+});
+app.post("/api/meta/auth-url", (req, res) => {
+  if (!metaConfigured()) return res.status(400).json({ error: "Faltam META_APP_ID e META_APP_SECRET nas variáveis da Vercel." });
+  const state = metaSign({ e: String(req.authEmail || "").toLowerCase(), t: Date.now() });
+  const url = `https://www.facebook.com/${(process.env.META_GRAPH_VERSION || "v24.0").trim()}/dialog/oauth?` + new URLSearchParams({
+    client_id: META_APP_ID, redirect_uri: metaRedirectUri(), state, scope: META_SCOPES, response_type: "code"
+  }).toString();
+  return res.json({ url });
+});
+app.get("/api/meta/callback", async (req, res) => {
+  const back = (status, motivo) => res.redirect(`${PUBLIC_BASE_URL}/?meta=${status}${motivo ? `&motivo=${encodeURIComponent(motivo)}` : ""}#/configuracoes`);
+  if (!metaConfigured()) return res.status(400).send("Meta não configurada no servidor.");
+  if (req.query.error) return back("erro", String(req.query.error_description || req.query.error));
+  const state = metaReadState(String(req.query.state || ""));
+  if (!state?.e || Date.now() - Number(state.t) > 15 * 6e4) return back("erro", "link expirado, tente de novo");
+  try {
+    const short = await graph("/oauth/access_token", { params: { client_id: META_APP_ID, client_secret: META_APP_SECRET, redirect_uri: metaRedirectUri(), code: String(req.query.code || "") } });
+    const long = await graph("/oauth/access_token", { params: { grant_type: "fb_exchange_token", client_id: META_APP_ID, client_secret: META_APP_SECRET, fb_exchange_token: short.access_token } });
+    // Tokens de Página obtidos com o token longo do usuário não expiram
+    const pages = await graph("/me/accounts", { token: long.access_token, params: { fields: "id,name,access_token,instagram_business_account{id,username}", limit: 50 } });
+    const list = pages.data || [];
+    if (!list.length) return back("erro", "nenhuma Página do Facebook foi autorizada");
+    const sb = db();
+    for (const pg of list) {
+      // Liga os avisos (webhooks) desta Página ao app: mensagens, respostas enviadas pela equipe e comentários
+      try {
+        await graph(`/${pg.id}/subscribed_apps`, { method: "POST", token: pg.access_token, params: { subscribed_fields: "messages,message_echoes,messaging_postbacks,feed" } });
+      } catch (err) {
+        console.warn(`[Meta] não foi possível assinar os avisos da Página ${pg.name}:`, errorMessage(err));
+      }
+      check(await sb.from("meta_connections").upsert({
+        page_id: pg.id, page_name: pg.name, page_token: pg.access_token,
+        ig_user_id: pg.instagram_business_account?.id || null, ig_username: pg.instagram_business_account?.username || null,
+        connected_by: state.e, connected_at: (/* @__PURE__ */ new Date()).toISOString(), last_error: null
+      }, { onConflict: "page_id" }), "gravar conexão da Meta");
+    }
+    return back("conectado");
+  } catch (err) {
+    console.error("[Meta callback]", errorMessage(err));
+    return back("erro", errorMessage(err));
+  }
+});
+app.post("/api/meta/disconnect", async (req, res) => {
+  const { pageId } = req.body || {};
+  if (!pageId) return res.status(400).json({ error: "pageId é obrigatório" });
+  try {
+    const conn = await connectionFor({ pageId });
+    if (conn?.page_token) {
+      await graph(`/${pageId}/subscribed_apps`, { method: "DELETE", token: conn.page_token }).catch(() => null);
+    }
+    check(await db().from("meta_connections").delete().eq("page_id", pageId), "remover conexão");
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ error: errorMessage(err) });
+  }
+});
+// Página simples de privacidade (a Meta exige um link para publicar o app)
+app.get("/api/meta/privacidade", (_req, res) => {
+  res.type("html").send(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Política de Privacidade — CRM Será Cacau</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:720px;margin:40px auto;padding:0 16px;line-height:1.6;color:#1e293b">
+<h1>Política de Privacidade — CRM Será Cacau</h1>
+<p>Este aplicativo é de uso interno da equipe comercial da Será Cacau. Ele recebe as mensagens enviadas para a nossa Página do Facebook e para o nosso Instagram profissional, e os comentários feitos nas nossas publicações e anúncios, para que a equipe possa responder e acompanhar o atendimento.</p>
+<p>Guardamos apenas o necessário para o atendimento: nome ou usuário público, o conteúdo das mensagens e comentários, e as datas. Os dados não são vendidos nem compartilhados com terceiros e ficam armazenados em ambiente seguro, com acesso restrito à equipe.</p>
+<p><strong>Exclusão de dados:</strong> para pedir a exclusão dos seus dados, envie uma mensagem para a Página da Será Cacau ou para o nosso Instagram com o pedido "excluir meus dados". A exclusão é feita em até 30 dias.</p>
+</body></html>`);
+});
+
+// ---------- Avisos da Meta (webhook) ----------
+app.get("/api/webhook/meta", (req, res) => {
+  if (req.query["hub.mode"] === "subscribe" && META_VERIFY_TOKEN && req.query["hub.verify_token"] === META_VERIFY_TOKEN) {
+    return res.status(200).send(String(req.query["hub.challenge"] || ""));
+  }
+  return res.sendStatus(403);
+});
+function metaSignatureOk(req) {
+  const sig = String(req.get("x-hub-signature-256") || "");
+  if (!META_APP_SECRET || !sig.startsWith("sha256=") || !req.rawBody) return false;
+  const expected = "sha256=" + crypto.createHmac("sha256", META_APP_SECRET).update(req.rawBody).digest("hex");
+  return sig.length === expected.length && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+}
+async function upsertSocialMessage({ canal, ownerId, conn, participantId, mid, fromMe, texto, at }) {
+  const sb = db();
+  const threadId = `${canal === "instagram" ? "ig" : "fb"}:${ownerId}:${participantId}`;
+  const existing = check(await sb.from("social_threads").select("*").eq("id", threadId).maybeSingle(), "ler conversa social");
+  let perfil = {};
+  if (!existing && conn?.page_token) {
+    try {
+      const u = await graph(`/${participantId}`, { token: conn.page_token, params: { fields: canal === "instagram" ? "name,username,profile_pic" : "first_name,last_name,profile_pic" } });
+      perfil = canal === "instagram"
+        ? { participant_name: u.name || u.username || null, participant_username: u.username || null, participant_pic: u.profile_pic || null }
+        : { participant_name: [u.first_name, u.last_name].filter(Boolean).join(" ") || null, participant_pic: u.profile_pic || null };
+    } catch (err) {
+      console.warn("[Meta] perfil indisponível:", errorMessage(err));
+    }
+  }
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  check(await sb.from("social_threads").upsert({
+    id: threadId, canal, page_id: conn?.page_id || null, ig_user_id: conn?.ig_user_id || null, participant_id: participantId,
+    ...perfil,
+    ultima_mensagem: texto, ultima_mensagem_at: at,
+    ...(fromMe ? {} : { ultima_do_cliente_at: at, nao_lidas: (existing?.nao_lidas || 0) + 1 }),
+    updated_at: now
+  }, { onConflict: "id" }), "gravar conversa social");
+  check(await sb.from("social_messages").upsert({ id: mid, thread_id: threadId, from_me: fromMe, texto, enviada_at: at, updated_at: now }, { onConflict: "id" }), "gravar mensagem social");
+}
+async function upsertSocialComment(row, conn) {
+  const sb = db();
+  const existing = check(await sb.from("social_comments").select("id, media_thumb, permalink").eq("id", row.id).maybeSingle(), "ler comentário");
+  let media = {};
+  if (!existing && conn?.page_token) {
+    try {
+      if (row.canal === "instagram" && row.media_id) {
+        const m = await graph(`/${row.media_id}`, { token: conn.page_token, params: { fields: "permalink,media_url,thumbnail_url,caption" } });
+        media = { permalink: m.permalink || null, media_thumb: m.thumbnail_url || m.media_url || null, post_texto: (m.caption || "").slice(0, 300) || null };
+      } else if (row.canal === "facebook" && row.post_id) {
+        const m = await graph(`/${row.post_id}`, { token: conn.page_token, params: { fields: "permalink_url,full_picture,message" } });
+        media = { permalink: m.permalink_url || null, media_thumb: m.full_picture || null, post_texto: (m.message || "").slice(0, 300) || null };
+      }
+    } catch (err) {
+      console.warn("[Meta] publicação indisponível:", errorMessage(err));
+    }
+  }
+  check(await sb.from("social_comments").upsert({ ...row, ...media, updated_at: (/* @__PURE__ */ new Date()).toISOString() }, { onConflict: "id" }), "gravar comentário");
+}
+async function handleMetaEntry(object, entry) {
+  if (object === "page") {
+    const conn = await connectionFor({ pageId: entry.id });
+    for (const m of entry.messaging || []) {
+      if (!m.message || m.message.is_deleted) continue;
+      const fromMe = Boolean(m.message.is_echo);
+      const participantId = fromMe ? m.recipient?.id : m.sender?.id;
+      if (!participantId) continue;
+      await upsertSocialMessage({ canal: "messenger", ownerId: entry.id, conn, participantId, mid: m.message.mid, fromMe,
+        texto: m.message.text || attachmentLabel(m.message.attachments) || "[Mensagem]", at: tsIso(m.timestamp) });
+    }
+    for (const ch of entry.changes || []) {
+      const v = ch.value || {};
+      if (ch.field !== "feed" || v.item !== "comment") continue;
+      if (v.verb === "remove") { await db().from("social_comments").delete().eq("id", v.comment_id); continue; }
+      if (v.verb === "hide" || v.verb === "unhide") { await db().from("social_comments").update({ oculto: v.verb === "hide" }).eq("id", v.comment_id); continue; }
+      if (v.verb !== "add" && v.verb !== "edited") continue;
+      await upsertSocialComment({
+        id: v.comment_id, canal: "facebook", page_id: entry.id, post_id: v.post_id || null, media_id: null,
+        parent_id: v.parent_id && v.parent_id !== v.post_id ? v.parent_id : null,
+        author_id: v.from?.id || null, author_name: v.from?.name || null, author_username: null,
+        do_proprio_perfil: v.from?.id === entry.id, texto: v.message || "", criado_at: tsIso(v.created_time)
+      }, conn);
+    }
+  } else if (object === "instagram") {
+    const conn = await connectionFor({ igUserId: entry.id });
+    for (const m of entry.messaging || []) {
+      if (!m.message || m.message.is_deleted) continue;
+      const fromMe = Boolean(m.message.is_echo);
+      const participantId = fromMe ? m.recipient?.id : m.sender?.id;
+      if (!participantId) continue;
+      await upsertSocialMessage({ canal: "instagram", ownerId: entry.id, conn, participantId, mid: m.message.mid, fromMe,
+        texto: m.message.text || attachmentLabel(m.message.attachments) || "[Mensagem]", at: tsIso(m.timestamp) });
+    }
+    for (const ch of entry.changes || []) {
+      const v = ch.value || {};
+      if (ch.field !== "comments" || !v.id) continue;
+      await upsertSocialComment({
+        id: v.id, canal: "instagram", page_id: conn?.page_id || null, post_id: null, media_id: v.media?.id || null,
+        ad_id: v.media?.ad_id || null, ad_title: v.media?.ad_title || null, parent_id: v.parent_id || null,
+        author_id: v.from?.id || null, author_name: v.from?.username || null, author_username: v.from?.username || null,
+        do_proprio_perfil: v.from?.id === entry.id, texto: v.text || "", criado_at: tsIso(entry.time)
+      }, conn);
+    }
+  }
+}
+app.post("/api/webhook/meta", async (req, res) => {
+  if (!metaSignatureOk(req)) {
+    console.warn("[Meta webhook] assinatura inválida: confira META_APP_SECRET");
+    return res.sendStatus(401);
+  }
+  const { object, entry } = req.body || {};
+  try {
+    for (const e of entry || []) await handleMetaEntry(object, e);
+  } catch (err) {
+    console.error("[Meta webhook]", errorMessage(err));
+  }
+  return res.sendStatus(200);
+});
+
+// ---------- Tela Social ----------
+app.get("/api/social/threads", async (req, res) => {
+  try {
+    let q = db().from("social_threads").select("*").order("ultima_mensagem_at", { ascending: false }).limit(200);
+    if (req.query.canal) q = q.eq("canal", String(req.query.canal));
+    return res.json({ threads: check(await q, "ler conversas sociais") || [] });
+  } catch (err) {
+    return res.status(500).json({ error: errorMessage(err) });
+  }
+});
+app.get("/api/social/messages", async (req, res) => {
+  try {
+    const rows = check(await db().from("social_messages").select("*").eq("thread_id", String(req.query.threadId || ""))
+      .order("enviada_at", { ascending: true }).limit(500), "ler mensagens sociais") || [];
+    return res.json({ messages: rows });
+  } catch (err) {
+    return res.status(500).json({ error: errorMessage(err) });
+  }
+});
+app.post("/api/social/read", async (req, res) => {
+  try {
+    await db().from("social_threads").update({ nao_lidas: 0 }).eq("id", String(req.body?.threadId || ""));
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ error: errorMessage(err) });
+  }
+});
+app.post("/api/social/send", async (req, res) => {
+  const { threadId, texto } = req.body || {};
+  if (!threadId || !String(texto || "").trim()) return res.status(400).json({ error: "Informe a conversa e o texto." });
+  try {
+    const sb = db();
+    const th = check(await sb.from("social_threads").select("*").eq("id", threadId).maybeSingle(), "ler conversa");
+    if (!th) return res.status(404).json({ error: "Conversa não encontrada." });
+    if (th.ultima_do_cliente_at && Date.now() - new Date(th.ultima_do_cliente_at).getTime() > 24 * 36e5) {
+      return res.status(400).json({ error: "Passaram mais de 24 horas desde a última mensagem do cliente. Pela regra da Meta, só dá para responder depois que ele escrever de novo." });
+    }
+    const conn = th.page_id ? await connectionFor({ pageId: th.page_id }) : await connectionFor({ igUserId: th.ig_user_id });
+    if (!conn) return res.status(400).json({ error: "Página não conectada. Conecte em Configurações > Integrações." });
+    const sent = await graph(`/${conn.page_id}/messages`, { method: "POST", token: conn.page_token,
+      body: { recipient: { id: th.participant_id }, messaging_type: "RESPONSE", message: { text: String(texto) } } });
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    check(await sb.from("social_messages").upsert({ id: sent.message_id || `out-${Date.now()}`, thread_id: threadId, from_me: true, texto: String(texto), enviada_at: now, updated_at: now }, { onConflict: "id" }), "gravar resposta");
+    check(await sb.from("social_threads").update({ ultima_mensagem: String(texto), ultima_mensagem_at: now, nao_lidas: 0, updated_at: now }).eq("id", threadId), "atualizar conversa");
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(502).json({ error: errorMessage(err) });
+  }
+});
+app.get("/api/social/comments", async (req, res) => {
+  try {
+    let q = db().from("social_comments").select("*").eq("do_proprio_perfil", false).order("criado_at", { ascending: false }).limit(300);
+    if (req.query.canal) q = q.eq("canal", String(req.query.canal));
+    if (req.query.status === "pendentes") q = q.eq("respondido", false).eq("oculto", false);
+    return res.json({ comments: check(await q, "ler comentários") || [] });
+  } catch (err) {
+    return res.status(500).json({ error: errorMessage(err) });
+  }
+});
+app.post("/api/social/comment-reply", async (req, res) => {
+  const { commentId, texto } = req.body || {};
+  if (!commentId || !String(texto || "").trim()) return res.status(400).json({ error: "Informe o comentário e o texto." });
+  try {
+    const sb = db();
+    const c = check(await sb.from("social_comments").select("*").eq("id", commentId).maybeSingle(), "ler comentário");
+    if (!c) return res.status(404).json({ error: "Comentário não encontrado." });
+    const conn = await connectionFor({ pageId: c.page_id });
+    if (!conn) return res.status(400).json({ error: "Página não conectada." });
+    if (c.canal === "instagram") await graph(`/${commentId}/replies`, { method: "POST", token: conn.page_token, params: { message: String(texto) } });
+    else await graph(`/${commentId}/comments`, { method: "POST", token: conn.page_token, params: { message: String(texto) } });
+    check(await sb.from("social_comments").update({ respondido: true, resposta_texto: String(texto), respondido_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("id", commentId), "marcar respondido");
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(502).json({ error: errorMessage(err) });
+  }
+});
+app.post("/api/social/comment-hide", async (req, res) => {
+  const { commentId, ocultar = true } = req.body || {};
+  try {
+    const sb = db();
+    const c = check(await sb.from("social_comments").select("*").eq("id", commentId).maybeSingle(), "ler comentário");
+    if (!c) return res.status(404).json({ error: "Comentário não encontrado." });
+    const conn = await connectionFor({ pageId: c.page_id });
+    if (!conn) return res.status(400).json({ error: "Página não conectada." });
+    await graph(`/${commentId}`, { method: "POST", token: conn.page_token, params: c.canal === "instagram" ? { hide: Boolean(ocultar) } : { is_hidden: Boolean(ocultar) } });
+    check(await sb.from("social_comments").update({ oculto: Boolean(ocultar) }).eq("id", commentId), "ocultar comentário");
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(502).json({ error: errorMessage(err) });
+  }
+});
+// "Enviar para o funil": cria contato e lead a partir de uma conversa ou de um comentário
+app.post("/api/social/criar-lead", async (req, res) => {
+  const { threadId, commentId } = req.body || {};
+  try {
+    const sb = db();
+    const src = threadId
+      ? check(await sb.from("social_threads").select("*").eq("id", threadId).maybeSingle(), "ler conversa")
+      : check(await sb.from("social_comments").select("*").eq("id", commentId).maybeSingle(), "ler comentário");
+    if (!src) return res.status(404).json({ error: "Origem não encontrada." });
+    if (src.lead_id) {
+      const ja = check(await sb.from("crm_records").select("id").eq("entity", "leads").eq("id", src.lead_id).eq("deleted", false).maybeSingle(), "ler lead");
+      if (ja) return res.json({ ok: true, leadId: src.lead_id, existente: true });
+    }
+    const canalNome = threadId ? (src.canal === "instagram" ? "Instagram" : "Facebook") : (src.canal === "instagram" ? "Instagram" : "Facebook");
+    const pessoaId = threadId ? src.participant_id : src.author_id;
+    const usuario = threadId ? src.participant_username : src.author_username;
+    const nome = (threadId ? src.participant_name : src.author_name) || (usuario ? `@${usuario}` : `Contato do ${canalNome}`);
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const contactId = `ct-${canalNome === "Instagram" ? "ig" : "fb"}-${pessoaId}`;
+    const contact = {
+      id: contactId, nome, telefones: [], emails: [], tags: [], consentimentoMarketing: false, createdAt: now, updatedAt: now,
+      canais: canalNome === "Instagram" ? { instagram: usuario ? `@${usuario}` : pessoaId } : { facebook: nome },
+      customFields: {}
+    };
+    const { first } = await stagesById();
+    const entry = first?.stages?.find((st) => st.tipo === "entrada");
+    const lead = {
+      id: `so-${canalNome === "Instagram" ? "ig" : "fb"}-${pessoaId}`, nome, valor: 0, pipelineId: first?.id || "pipe-vendas", stageId: entry?.id || "st-entrada",
+      responsavelId: "", contactIds: [contactId], tags: [], origemId: "", customFields: {}, produtos: [], createdAt: now, updatedAt: now,
+      ultimaInteracaoAt: now, naoLidas: 0,
+      rastreamento: {
+        fonte: canalNome, plataforma: canalNome, posicionamento: threadId ? "Direct / Messenger" : "Comentário",
+        anuncio: src.ad_title || void 0, anuncioId: src.ad_id || void 0, dataEntrada: now,
+        observacao: threadId ? void 0 : `Comentou: "${String(src.texto || "").slice(0, 200)}"`
+      }
+    };
+    check(await sb.from("crm_records").upsert([
+      { entity: "contacts", id: contactId, data: contact, deleted: false, updated_at: now, updated_by: "social", match_key: matchKeyFor("contacts", contact) },
+      { entity: "leads", id: lead.id, data: lead, deleted: false, updated_at: now, updated_by: "social", match_key: matchKeyFor("leads", lead) }
+    ], { onConflict: "entity,id" }), "criar lead social");
+    await sb.from(threadId ? "social_threads" : "social_comments").update({ lead_id: lead.id }).eq("id", threadId || commentId);
+    return res.json({ ok: true, leadId: lead.id });
+  } catch (err) {
+    return res.status(500).json({ error: errorMessage(err) });
+  }
+});
+app.get("/api/crm/data", async (_req, res) => {
+  if (!supabaseAdmin) return res.status(503).json({ error: "Supabase não configurado no servidor" });
+===== FIM DO TRECHO NOVO =====
